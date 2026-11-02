@@ -2,7 +2,7 @@
 
 ## Public API
 
-Import from the submodules, `interpose.settings` and `interpose.secret`. The package itself exports only `__version__` and `__description__`. Anything starting with `_` is internal.
+Import from the submodules: `interpose.settings`, `interpose.secret` and `interpose.metrics`. The package itself exports only `__version__` and `__description__`. Anything starting with `_` is internal.
 
 ### `interpose.settings`
 
@@ -54,6 +54,47 @@ r.values["listen.port"], r.sources["listen.port"]  # (9090, "MYAPP_LISTEN_PORT")
 **`read_secret_dir(directory: Path) -> Mapping[str, Secret]`**: each regular file in `directory` (symlinks followed) as a `Secret`, keyed by file name, minus one trailing newline. Dot-entries are skipped, which covers a Kubernetes secret volume's `..data`. A missing directory gives an empty mapping. Raises `ConfigError` if the directory or a file can't be read.
 
 **`MASK`**: `"********"`.
+
+### `interpose.metrics`
+
+Prometheus text exposition (format 0.0.4). Every label takes its values from a declared set, so the series count is fixed by code and configuration, never by traffic.
+
+**`Label(name, values=())`**: a label name and the only values it may take.
+
+- `name`: matches `[a-zA-Z_][a-zA-Z0-9_]*`, not starting with `__`.
+- `values`: an iterable of `str` (a list, not a bare string: `Label("kind", "ca")` is a `TypeError`); read back as a `frozenset[str]`. `value in label` tests one.
+- **`declare(*values)`**: allow more values, from configuration (the middleware names a reload brings), never from measured data. Values are never removed. One `Label` can be shared by several metrics, so one `declare` covers all of them.
+
+**`Counter(name, help, labels=())`**: `inc(*values, amount=1.0)`. `amount` must be finite and zero or more.
+
+**`Gauge(name, help, labels=(), read=None)`**: `set(value, *values)`, `add(amount, *values)`. With `read` (a callable returning `{label values: number}`), the samples come from it when the gauge renders.
+
+**`Histogram(name, help, buckets, labels=())`**: `observe(value, *values)`. Classic cumulative buckets (inclusive), plus `_sum` and `_count`; `+Inf` is added for you. Buckets are finite, distinct and sorted for you. `NaN` is refused. `samples()` gives each label set's count.
+
+- `labels` is a sequence of `Label`. Each call passes one value per label, in order. A value outside its label's set, or the wrong number of values, raises `ValueError`, which names the metric and the label but never the value.
+- Declaration errors are `ValueError` (or `TypeError` for a label that isn't a `Label`): a bad metric or label name, a repeated label name, a histogram label called `le`, bad buckets.
+
+**`Registry(metrics=())`**: the metrics one endpoint exports.
+
+- **`register(metric) -> metric`**: adds it and returns it. A second metric with the same name, or one whose samples clash with another's (a counter `foo_count` next to a histogram `foo`), raises `ValueError`.
+- Iterates in registration order; `len()` counts the metrics.
+- **`render() -> str`**: every metric's `# HELP`, `# TYPE` and samples (sorted by label values), joined by newlines and ending in one; `""` when empty.
+
+**`CONTENT_TYPE`**: `"text/plain; version=0.0.4; charset=utf-8"`, for an HTTP response's `Content-Type`.
+
+```python
+from interpose.metrics import CONTENT_TYPE, Counter, Label, Registry
+
+OUTCOME = Label("outcome", ["ok", "denied", "error"])
+REGISTRY = Registry()
+CALLS = REGISTRY.register(Counter("myapp_calls_total", "Calls, by outcome.", (OUTCOME,)))
+
+CALLS.inc("ok")
+CALLS.inc("example.org")  # ValueError: label 'outcome' got a value outside its declared set
+body = REGISTRY.render()  # serve with CONTENT_TYPE, or as a file
+```
+
+interpose doesn't serve the text: an HTTP endpoint or a virtual file is the project's.
 
 ## Stability
 

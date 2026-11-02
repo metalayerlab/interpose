@@ -19,6 +19,7 @@ CI runs the unit tests on every supported Python version, together with ruff, my
 
 | `tests/unit/test_settings.py` | Declarations, the lookup order and sources, coercion of each type from YAML, the environment and `_FILE`, the checks, secret settings |
 | `tests/unit/test_secret.py` | `Secret` masking (str, repr, f-strings, logging, exceptions) and `read_secret_dir` |
+| `tests/unit/test_metrics.py` | Label sets enforced on every call, declaration checks, the text format, and parity with mitm-proxy's `/metrics` lines |
 
 There are no fixtures beyond pytest's own: tests write YAML and secret files under `tmp_path` and pass `environ` as a plain dict, so the real environment never leaks in.
 
