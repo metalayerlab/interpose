@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/metalayerlab/interpose/compare/v0.1.2...v0.1.3) (2026-11-02)
+
+
+### 🐛 Bug Fixes
+
+* skip_inherited counts instance hooks as overrides and still asks until ([#16](https://github.com/metalayerlab/interpose/issues/16)) ([9bbef78](https://github.com/metalayerlab/interpose/commit/9bbef78a186be0e7ed58aa4eceec4911dc096cd4))
+
 ## [0.1.2](https://github.com/metalayerlab/interpose/compare/v0.1.1...v0.1.2) (2026-11-02)
 
 
