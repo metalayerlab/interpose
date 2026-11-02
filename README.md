@@ -8,7 +8,7 @@ Shared mechanism for metalayerlab interceptors — the layered settings loader, 
 Every metalayerlab interceptor (mitm-proxy, sluice) needs the same settings engine: each setting declared
 once, read from a `_FILE` variable, the environment, a YAML file or its default, and typed strictly. Copies
 of it drifted, so it lives here, with the `Secret` type that keeps secrets out of logs. Settings and secrets
-are v0.1; Prometheus output and the middleware pipeline core follow.
+are v0.1, Prometheus text exposition with declared label sets follows it, then the middleware pipeline core.
 
 ## Quick Start
 

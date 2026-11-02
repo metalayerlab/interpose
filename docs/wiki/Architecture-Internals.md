@@ -4,7 +4,7 @@ How interpose works inside: for contributors, reviewers and AI assistants. User-
 
 ## Overview
 
-Two modules and no state. A consumer's `config.py` builds one `Settings` at import, which only validates the declarations and binds the prefix. All I/O happens when `resolve()` is called.
+Three modules and no global state. A consumer's `config.py` builds one `Settings` at import, which only validates the declarations and binds the prefix. All I/O happens when `resolve()` is called.
 
 ```mermaid
 flowchart LR
@@ -23,6 +23,7 @@ flowchart LR
 | `interpose/__init__.py` | Package version and description |
 | `interpose/settings.py` | `Setting`, `Settings`, `Resolved`, `ConfigError`, coercion, the single-value checks |
 | `interpose/secret.py` | `Secret`, `MASK`, `read_secret_dir` |
+| `interpose/metrics.py` | `Label`, `Counter`, `Gauge`, `Histogram`, `Registry`, `CONTENT_TYPE`: Prometheus text exposition |
 
 ## Data flow
 
@@ -45,6 +46,16 @@ flowchart LR
 
 Nothing is cached, and nothing is logged. The first error stops the resolve.
 
+### Metrics
+
+A project builds its metrics at startup, each with `Label` objects that hold the allowed values, and registers them in a `Registry`. Each `inc`/`set`/`add`/`observe` checks its label values against those sets before it touches a series, so a refused value leaves no trace. A gauge's `read` callback is checked when it renders. `Registry.render()` walks the metrics in registration order:
+
+- `# HELP` (with `\` and newline escaped) and `# TYPE`, then each series sorted by its label values;
+- label values escape `\`, `"` and newline; integral numbers have no decimal point; `+Inf`, `-Inf`, `NaN`;
+- a histogram writes cumulative `_bucket` lines with `le` as Python's `repr` of the bound (`"1.0"`), then `le="+Inf"`, `_sum` and `_count`.
+
+That is byte-for-byte mitm-proxy's output before it moved here (0002), which keeps its dashboards working.
+
 ## Design decisions
 
 Why things are the way they are is recorded in [docs/design/](https://github.com/metalayerlab/interpose/tree/main/docs/design). Rejected ideas and the reasons are in [TODO.md](https://github.com/metalayerlab/interpose/blob/main/TODO.md) under "Decided against".
@@ -54,3 +65,4 @@ Why things are the way they are is recorded in [docs/design/](https://github.com
 - **Strict coercion** (0001): refuse what isn't the declared type, never convert silently.
 - **`Secret` isn't a `str`** (0001): it can't reach a log or an f-string as its value by accident.
 - **Mechanism only** (0001): rules that span settings, and policies, stay in each project.
+- **Labels from declared sets** ([0002](https://github.com/metalayerlab/interpose/blob/main/docs/design/0002-metrics.md)): an undeclared label value is a `ValueError`, so "no unbounded labels" is enforced, not a comment. Transport (HTTP, a virtual file) stays in the project.

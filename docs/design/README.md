@@ -9,3 +9,4 @@ Approved (by a human) → Implemented; supersede an implemented record with a ne
 | # | Title | Status | Decision in one line |
 |---|---|---|---|
 | [0001](0001-initial-design.md) | Initial design | Implemented | v0.1 is settings and secrets: `Settings`/`Setting` with the template's lookup order and strict coercion, `Secret` and `read_secret_dir`; pyyaml only; consumers pin a GitHub tag; metrics (0002) and the pipeline core (0003) follow |
+| [0002](0002-metrics.md) | Metrics | Implemented | `interpose.metrics`: mitm-proxy's hand-written Prometheus text exposition (`Counter`, `Gauge`, `Histogram`, `Registry`), with every label limited to a declared `Label` value set; no dependency, no transport |

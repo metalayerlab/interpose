@@ -4,12 +4,13 @@
 
 The mechanism metalayerlab's interceptors would otherwise each copy. mitm-proxy (an HTTP/TLS proxy) and sluice (a FUSE filesystem) were generated from the same template, and each got its own copy of the settings engine in a project-owned `config.py`. Template fixes never reached those copies, and they drifted: the same YAML value was coerced three different ways, two of them silently wrong. interpose holds one engine, and a fix reaches every consumer as a version bump.
 
-It holds **mechanism, not policy**. A project keeps its own settings, its `Config` dataclass and its rules that span settings. interpose never touches transports (HTTP, TLS, FUSE).
+It holds **mechanism, not policy**. A project keeps its own settings, its `Config` dataclass and its rules that span settings. interpose never touches transports (HTTP, TLS, FUSE): it renders the metrics text, and the project serves it.
 
 | Version | What |
 |---|---|
 | v0.1 | `interpose.settings` (the layered settings engine) and `interpose.secret` (`Secret`, `read_secret_dir`) |
-| later | Prometheus text exposition (design 0002), the middleware pipeline core (design 0003) |
+| next release | `interpose.metrics`: Prometheus text exposition with declared label sets (design 0002) |
+| later | the middleware pipeline core (design 0003) |
 
 ## How it works
 

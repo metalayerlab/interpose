@@ -10,7 +10,7 @@ the team (and its AI assistants) should know at a glance.
   lands, each consumer needs a scheduled workflow that opens a PR when interpose has a newer tag; it belongs
   in the template that generates consumers (template-python), not here. Revisit when #16151 merges: it
   covers `[tool.uv.sources]` `tag =` only.
-- [ ] Design 0002 (metrics) and 0003 (pipeline core), after the consumers switch to v0.1.
+- [ ] Design 0003 (pipeline core).
 
 ## Decided against (don't re-propose without reading this first)
 
@@ -18,3 +18,5 @@ the team (and its AI assistants) should know at a glance.
 - Publishing to PyPI: consumers are our own repos and pin a GitHub tag (design 0001).
 - A template-owned engine file instead of a library: covers settings only; `Secret`, metrics and the pipeline don't belong in every project (design 0001).
 - A float setting type: no setting needs one; time settings are integer `_ms` (design 0001).
+- `prometheus_client`: a dependency for a small format, its default collectors add series, and its label values are unbounded (design 0002).
+- Folding undeclared label values into an `other` series: hides the bug; an undeclared value is a `ValueError` (design 0002).
