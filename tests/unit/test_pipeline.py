@@ -1278,3 +1278,29 @@ def test_sluice_semantics_a_pre_set_on_the_instance_runs() -> None:
 def test_run_exposes_its_policy() -> None:
     r: Run[Mw] = Pipeline([Mw("a")], SKIP).start()
     assert r.policy is SKIP
+
+
+def test_active_is_a_copy_the_caller_may_change() -> None:
+    a, b = Mw("a"), Mw("b")
+    r = Pipeline([a, b], SKIP).start()
+    mine = r.active
+    mine.clear()
+    assert [e.middleware for e in r.active] == [a, b]
+    run(r.each("hook", lambda mw: mw.hook()))
+    assert len(a.calls) == len(b.calls) == 1
+
+
+def test_active_follows_failures_and_changes_to_entries() -> None:
+    # `active` is cached (design 0006): a failure, or a project changing `entries` after
+    # start(), must still show in it and in the phases that default to it.
+    a, b, c = Mw("a", raises=Boom()), Mw("b"), Mw("c")
+    r = Pipeline([a, b, c], SKIP).start()
+    assert [e.middleware for e in r.active] == [a, b, c]
+    run(r.each("hook", lambda mw: mw.hook()))
+    assert [e.middleware for e in r.active] == [b, c]
+    r.entries.remove(r.entries[2])
+    assert [e.middleware for e in r.active] == [b]
+    run(r.each("hook", lambda mw: mw.hook()))
+    assert [len(m.calls) for m in (a, b, c)] == [1, 2, 1]
+    r.entries[1] = Entry.of(c)
+    assert [e.middleware for e in r.active] == [c]

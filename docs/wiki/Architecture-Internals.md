@@ -63,12 +63,27 @@ A project builds a `Pipeline` once (its chain and its `Policy`) and calls `start
 
 1. Skip if the entry has failed (observers: unless `observe_failed`) or `skip_inherited` says the hook isn't overridden: neither the middleware's class nor the instance itself defines it ([0004](https://github.com/metalayerlab/interpose/blob/main/docs/design/0004-pipeline-core-decisions.md)). In `each` and `before`, such a hook counts as the base's no-op returning `None`, so `until` is asked as if it had run.
 2. Time it into `timings[name]` with `time.perf_counter`, failed calls included.
-3. Bound it with `asyncio.timeout` (the entry's timeout, else the policy's; `NO_LIMIT` means none). Only the guard's own limit is a timeout (`expired()`); a `TimeoutError` the hook raises is an ordinary failure. A hook that *returns* after its limit is a timeout too, its result discarded ([0005](https://github.com/metalayerlab/interpose/blob/main/docs/design/0005-hook-cancellation-and-late-results.md)): `late="swallowed"` if the deadline fired (`expired()`), so the hook caught its cancellation; `late="overran"` if it never fired but the loop clock is past `when()`, so the hook ran synchronous code past the deadline. Both use public `asyncio` API, and `asyncio.timeout`'s exit withdraws its cancel request, so nothing is left pending for the caller.
+3. Bound it with `asyncio.timeout` (the entry's timeout, else the policy's; `NO_LIMIT` means none, and with no limit the hook is awaited directly). Only the guard's own limit is a timeout (`expired()`); a `TimeoutError` the hook raises is an ordinary failure. A hook that *returns* after its limit is a timeout too, its result discarded ([0005](https://github.com/metalayerlab/interpose/blob/main/docs/design/0005-hook-cancellation-and-late-results.md)): `late="swallowed"` if the deadline fired (`expired()`), so the hook caught its cancellation; `late="overran"` if it never fired but the loop clock is past `when()`, so the hook ran synchronous code past the deadline. Both use public `asyncio` API, and `asyncio.timeout`'s exit withdraws its cancel request, so nothing is left pending for the caller.
 4. Catch `Exception`. `answers` are re-raised (not by observers). Anything else, or a result `valid` refuses (or a `valid` that raises), is a failure: the entry leaves `active`, `on_failure` gets a `Failure`, and `"fail"` raises `HookFailed` from the hook's exception; `"skip"` returns `SKIPPED`.
 
 A timeout cancels the hook at its current `await`, so hooks must be cancel-safe (`try/finally`, `async with`) and must never swallow `CancelledError` or `BaseException`; blocking or CPU-bound work belongs off the event loop, since a timeout can't interrupt synchronous code, and a thread from `run_in_executor` or `asyncio.to_thread` keeps running after its `await` is cancelled.
 
 Every hook is awaited in turn on the caller's task. Nothing is scheduled with `create_task`, which is what carries backpressure from a slow hook back to the reader. Nothing is logged: `on_failure` is where the project logs with its unit ID. `after_pairs()` applies the after-phase policy: what ran, minus what failed, in `after_order`, and nothing after a stop unless `after_local`.
+
+#### Performance
+
+Each phase awaits the guard directly with the hook's arguments as a tuple (one coroutine frame per call, no `partial`), the guard enters `asyncio.timeout` only when a limit applies, and `Run.active` is cached until an entry fails or `entries` changes ([0006](https://github.com/metalayerlab/interpose/blob/main/docs/design/0006-guard-hot-path.md)). `uv run scripts/bench-pipeline.py` measures it; run it again with `PYTHONPATH=<other checkout>/src` to compare. Reference numbers (one workstation, Python 3.13, a no-op hook):
+
+| Case | v0.1.4 | v0.1.5 |
+|---|---|---|
+| bare `await` | 0.09 µs | 0.09 µs |
+| `call`, no timeout | 1.5–1.6 µs | 0.7 µs |
+| `call`, 5 s timeout | 3.3–3.5 µs | 3.2–3.5 µs |
+| `each` over five middleware, no timeout (bare loop 0.5 µs) | 9.1–9.5 µs | 2.9–3.0 µs |
+| `each` over five middleware, 5 s timeout | 20.4–20.8 µs | 17.5–18.2 µs |
+| `start` + `before` + `after`, five middleware, no timeout | 20.4–20.5 µs | 7.6–8.3 µs |
+
+With a limit, `asyncio.timeout` (a timer scheduled and cancelled per call) is most of the cost. With `skip_inherited`, a hook a middleware leaves alone isn't awaited at all.
 
 ## Design decisions
 
