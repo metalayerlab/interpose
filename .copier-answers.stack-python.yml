@@ -5,9 +5,9 @@ _src_path: gh:andronics/template-python
 base_answers:
     code_owners: '@metalayerlab/maintainers'
     dependabot_automerge: 'off'
-    description: Shared mechanism for metalayerlab interceptors — the layered settings
-        loader, Secret values, Prometheus text exposition, and a policy-configurable
-        async middleware pipeline.
+    description: Shared mechanism for metalayerlab interceptors — a policy-configurable
+        async middleware pipeline, the layered settings loader, Secret values, and
+        Prometheus text exposition.
     github_owner: metalayerlab
     license: Unlicense
     personal_data_guard: true

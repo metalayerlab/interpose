@@ -3,13 +3,16 @@
 [![CI](https://github.com/metalayerlab/interpose/actions/workflows/base-ci.yml/badge.svg)](https://github.com/metalayerlab/interpose/actions/workflows/base-ci.yml)
 [![Release](https://img.shields.io/github/v/release/metalayerlab/interpose?sort=semver)](https://github.com/metalayerlab/interpose/releases)
 
-Shared mechanism for metalayerlab interceptors — the layered settings loader, Secret values, Prometheus text exposition, and a policy-configurable async middleware pipeline.
+Shared mechanism for metalayerlab interceptors — a policy-configurable async middleware pipeline, the layered settings loader, Secret values, and Prometheus text exposition.
 
-Every metalayerlab interceptor (mitm-proxy, sluice) needs the same settings engine: each setting declared
-once, read from a `_FILE` variable, the environment, a YAML file or its default, and typed strictly. Copies
-of it drifted, so it lives here, with the `Secret` type that keeps secrets out of logs. Settings and secrets
-are v0.1; Prometheus text exposition with declared label sets (v0.1.1) and the middleware pipeline core,
-with per-project and per-middleware failure policy (v0.1.2), follow.
+Every metalayerlab interceptor (mitm-proxy, sluice) needs the same mechanism, and copies of it drifted, so
+it lives here:
+
+- **Pipeline** (v0.1.2): the middleware pipeline core, with per-project and per-middleware failure policy.
+- **Settings and secrets** (v0.1): each setting declared once, read from a `_FILE` variable, the
+  environment, a YAML file or its default, and typed strictly, with the `Secret` type that keeps secrets
+  out of logs.
+- **Metrics** (v0.1.1): Prometheus text exposition with declared label sets.
 
 ## Quick Start
 

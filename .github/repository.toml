@@ -1,6 +1,6 @@
 # GitHub's About box. Project-owned: edit it, then apply it with
 #   python3 scripts/repo-metadata.py
 # CI warns on each push to main while GitHub differs from this file.
-description = "Shared mechanism for metalayerlab interceptors \u2014 the layered settings loader, Secret values, Prometheus text exposition, and a policy-configurable async middleware pipeline."
+description = "Shared mechanism for metalayerlab interceptors \u2014 a policy-configurable async middleware pipeline, the layered settings loader, Secret values, and Prometheus text exposition."
 homepage = "https://github.com/metalayerlab/interpose/wiki"
 topics = ["python", "library"]
