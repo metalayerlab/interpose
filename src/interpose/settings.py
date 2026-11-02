@@ -1,0 +1,333 @@
+"""Layered settings: each setting is declared once and resolved from four places.
+
+The first place that has a value wins:
+
+1. ``<PREFIX><KEY>_FILE``: a file that holds the value (Docker and Kubernetes secrets)
+2. ``<PREFIX><KEY>``: an environment variable
+3. the YAML config file (``<PREFIX>CONFIG``, else the project's default path)
+4. the declared default
+
+``<KEY>`` is the dotted key in upper case, with the dots as underscores: with the prefix
+``SLUICE_``, ``listen.port`` is ``SLUICE_LISTEN_PORT``.
+
+The type comes from the default, and coercion is strict: a value that isn't the declared type is a
+`ConfigError`, never a silent conversion. Values are never logged, and an error never contains a
+secret setting's value. Nothing here does I/O until `Settings.resolve()` is called.
+"""
+
+from __future__ import annotations
+
+import datetime
+import os
+import re
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, replace
+from pathlib import Path
+from types import MappingProxyType
+from typing import Any, overload
+
+import yaml
+
+from interpose.secret import MASK, Secret
+
+__all__ = [
+    "ConfigError",
+    "Resolved",
+    "Setting",
+    "Settings",
+    "Value",
+    "non_negative",
+    "one_of",
+    "port",
+    "positive",
+]
+
+Value = str | int | bool | tuple[str, ...] | Secret
+
+_KEY = re.compile(r"[a-z0-9_]+(\.[a-z0-9_]+)*")
+# ASCII digits only: int() would also take "1_000" and other scripts' digits.
+_INT = re.compile(r"[+-]?[0-9]+")
+_TRUE = frozenset({"1", "true", "yes", "on"})
+_FALSE = frozenset({"0", "false", "no", "off"})
+# What a str setting (or a list item) accepts from YAML: a scalar. A date is a scalar YAML types for
+# you (`2026-11-01`); its text is what was written.
+_SCALAR = (str, int, float, datetime.date)
+
+
+class ConfigError(Exception):
+    """The configuration can't be read, or a value in it is invalid."""
+
+
+@dataclass(frozen=True)
+class Setting:
+    """One setting: its dotted key, default (which sets its type), help and flags.
+
+    `prefix` is set by `Settings`, never by hand. `check` gets the coerced value (before it is
+    wrapped in `Secret`) and raises `ValueError` with a reason.
+    """
+
+    key: str
+    default: str | int | bool
+    help: str
+    secret: bool = False
+    is_list: bool = False
+    check: Callable[[Value], None] | None = None
+    prefix: str = ""
+
+    @property
+    def env(self) -> str:
+        return self.prefix + self.key.upper().replace(".", "_")
+
+
+@dataclass(frozen=True)
+class Resolved:
+    """Typed values and where each came from, both keyed by setting key, in declaration order.
+
+    `values` holds `Secret` for secret settings and a tuple for list settings. `sources` holds the
+    `_FILE` variable's name, the environment variable's name, `"file"` or `"default"`.
+    """
+
+    values: Mapping[str, Value]
+    sources: Mapping[str, str]
+
+
+class Settings(Sequence[Setting]):
+    """A project's settings, bound to its environment-variable prefix and default config path.
+
+    Iterating gives each `Setting` with `prefix` set, so `setting.env` is the full variable name.
+    """
+
+    def __init__(self, prefix: str, settings: Iterable[Setting], *, default_path: Path) -> None:
+        bound: list[Setting] = []
+        seen: set[str] = set()
+        for setting in settings:
+            if not _KEY.fullmatch(setting.key):
+                raise ValueError(
+                    f"{setting.key!r}: a key is lower-case words of [a-z0-9_] joined by dots"
+                )
+            if setting.key in seen:
+                raise ValueError(f"{setting.key!r}: declared twice")
+            if setting.is_list and setting.default != "":
+                raise ValueError(f'{setting.key!r}: a list setting\'s default must be ""')
+            if setting.secret and (setting.is_list or not isinstance(setting.default, str)):
+                # A Secret holds one string; a secret int, bool or list has no masked form.
+                raise ValueError(f"{setting.key!r}: a secret setting must be a str setting")
+            seen.add(setting.key)
+            bound.append(replace(setting, prefix=prefix))
+        self.prefix = prefix
+        self.default_path = default_path
+        self.config_env = prefix + "CONFIG"
+        self._settings = tuple(bound)
+
+    @overload
+    def __getitem__(self, index: int) -> Setting: ...
+    @overload
+    def __getitem__(self, index: slice) -> Sequence[Setting]: ...
+    def __getitem__(self, index: int | slice) -> Setting | Sequence[Setting]:
+        return self._settings[index]
+
+    def __len__(self) -> int:
+        return len(self._settings)
+
+    def __iter__(self) -> Iterator[Setting]:
+        return iter(self._settings)
+
+    def __repr__(self) -> str:
+        return (
+            f"Settings({self.prefix!r}, {len(self)} settings, default_path={self.default_path!r})"
+        )
+
+    def resolve(
+        self, path: Path | None = None, environ: Mapping[str, str] | None = None
+    ) -> Resolved:
+        """Read the config file and the environment, and resolve every setting.
+
+        `path` defaults to `<PREFIX>CONFIG`, else `default_path`; a missing file means defaults.
+        `environ` defaults to `os.environ`. Raises `ConfigError` on the first invalid value.
+        """
+        env = os.environ if environ is None else environ
+        if path is None:
+            path = Path(env.get(self.config_env, str(self.default_path)))
+        data = _read_yaml(path)
+        values: dict[str, Value] = {}
+        sources: dict[str, str] = {}
+        for setting in self._settings:
+            values[setting.key], sources[setting.key] = _resolve_one(setting, data, env)
+        return Resolved(values=MappingProxyType(values), sources=MappingProxyType(sources))
+
+
+def _read_yaml(path: Path) -> Mapping[str, Any]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except OSError as e:
+        raise ConfigError(f"cannot read {path}: {e.strerror}") from None
+    except UnicodeDecodeError:
+        raise ConfigError(f"cannot read {path}: not UTF-8") from None
+    try:
+        loaded = yaml.safe_load(text)
+    except yaml.YAMLError as e:
+        # str(e) quotes the offending line, which may hold a secret: give its position only.
+        mark = getattr(e, "problem_mark", None)
+        where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
+        problem = getattr(e, "problem", None) or "invalid YAML"
+        raise ConfigError(f"cannot parse {path}{where}: {problem}") from None
+    if loaded is None:
+        return {}
+    if not isinstance(loaded, dict):
+        raise ConfigError(f"{path}: the top level must be a mapping")
+    return loaded
+
+
+def _lookup(data: Mapping[str, Any], dotted: str) -> Any:
+    """The value at a dotted key, or None when it's absent (or null) at any level."""
+    node: Any = data
+    for part in dotted.split("."):
+        if not isinstance(node, Mapping) or part not in node:
+            return None
+        node = node[part]
+    return node
+
+
+def _resolve_one(
+    setting: Setting, data: Mapping[str, Any], environ: Mapping[str, str]
+) -> tuple[Value, str]:
+    file_var = f"{setting.env}_FILE"
+    raw: Any
+    if file_var in environ:
+        path = Path(environ[file_var])
+        try:
+            raw = path.read_text(encoding="utf-8").rstrip()
+        except OSError as e:
+            raise ConfigError(f"cannot read {file_var} ({path}): {e.strerror}") from None
+        except UnicodeDecodeError:
+            raise ConfigError(f"cannot read {file_var} ({path}): not UTF-8") from None
+        source = file_var
+    elif setting.env in environ:
+        raw, source = environ[setting.env], setting.env
+    else:
+        raw = _lookup(data, setting.key)
+        source = "file"
+        if raw is None:
+            raw, source = setting.default, "default"
+    value = _coerce(setting, raw, source)
+    if setting.check is not None:
+        try:
+            setting.check(value)
+        except ValueError as e:
+            reason = str(e)
+            if setting.secret and isinstance(value, str) and value:
+                reason = reason.replace(value, MASK)
+            raise ConfigError(f"{setting.key}: {reason}") from None
+    if setting.secret:
+        # Settings only allows str secrets, so the coerced value is a str.
+        return Secret(str(value)), source
+    return value, source
+
+
+def _coerce(setting: Setting, raw: Any, source: str) -> str | int | bool | tuple[str, ...]:
+    """Give raw (a string from a file or the environment, or a YAML value) the setting's type."""
+    result: str | int | bool | tuple[str, ...] | None
+    if setting.is_list:
+        kind = "list"
+        result = _as_list(raw)
+    elif isinstance(setting.default, bool):
+        kind = "bool"
+        result = _as_bool(raw)
+    elif isinstance(setting.default, int):
+        kind = "int"
+        result = _as_int(raw)
+    else:
+        kind = "str"
+        result = _as_str(raw)
+    if result is None:
+        got = "" if setting.secret else f", got {raw!r}"
+        raise ConfigError(f"{setting.key}: expected {kind}{got} (from {source})")
+    return result
+
+
+def _as_bool(raw: Any) -> bool | None:
+    if isinstance(raw, bool):
+        return raw
+    # A YAML 1 or 0 is the same spelling as the string "1" or "0".
+    if isinstance(raw, int | str):
+        text = str(raw).strip().lower()
+        if text in _TRUE:
+            return True
+        if text in _FALSE:
+            return False
+    return None
+
+
+def _as_int(raw: Any) -> int | None:
+    # bool is an int subclass: int(True) would be a silent 1. A float would truncate (0.5 -> 0).
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str) and _INT.fullmatch(raw.strip()):
+        return int(raw)
+    return None
+
+
+def _as_str(raw: Any) -> str | None:
+    # str() of a list or mapping would be its repr.
+    if isinstance(raw, _SCALAR):
+        return str(raw)
+    return None
+
+
+def _as_list(raw: Any) -> tuple[str, ...] | None:
+    if isinstance(raw, str):
+        items: list[Any] = raw.split(",")
+    elif isinstance(raw, list):
+        items = raw
+    else:
+        return None
+    if not all(isinstance(item, _SCALAR) for item in items):
+        return None
+    return tuple(text for item in items if (text := str(item).strip()))
+
+
+# Single-value checks, for `Setting(check=...)`. Rules that span settings belong in the project.
+
+
+def port(value: Value) -> None:
+    """A TCP port: 1 to 65535."""
+    if not 0 < _int_value(value) < 65536:
+        raise ValueError(f"{value} is not a TCP port")
+
+
+def positive(value: Value) -> None:
+    """Greater than 0."""
+    if _int_value(value) <= 0:
+        raise ValueError(f"must be greater than 0, got {value}")
+
+
+def non_negative(value: Value) -> None:
+    """0 or more."""
+    if _int_value(value) < 0:
+        raise ValueError(f"must be 0 or more, got {value}")
+
+
+def one_of(*choices: str) -> Callable[[Value], None]:
+    """One of `choices`, in any case. The value keeps the case it was given in."""
+    if not choices:
+        raise ValueError("one_of() needs at least one choice")
+    allowed = {choice.lower() for choice in choices}
+    listed = ", ".join(choices)
+
+    def check(value: Value) -> None:
+        if not isinstance(value, str):
+            raise ValueError(f"expected one of {listed}")
+        if value.lower() not in allowed:
+            raise ValueError(f"expected one of {listed}, got {value!r}")
+
+    return check
+
+
+def _int_value(value: Value) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("expected int")
+    return value

@@ -35,4 +35,7 @@
 
 ### 🔑 Key Features
 
-<!-- guidance: three to five one-line features, each starting with an emoji. -->
+- 🥞 One lookup order: `_FILE` > environment > YAML > default
+- 🧱 Strict types: no silent `0` for a YAML `0.5`
+- 🧭 Where each value came from, for every setting
+- 🔒 `Secret`: masked in logs, reprs and errors

@@ -29,7 +29,10 @@ Never edit `CHANGELOG.md` or the version, and never push tags: release-please do
 - Settings go through `config.SETTINGS`. Secrets come from `_FILE`, and are never logged.
 - Prefer the standard library and existing dependencies. Justify every new one in the PR.
 
-<!-- guidance: project-specific rules (concurrency model, error types, naming), the kind of thing a reviewer keeps repeating. -->
+- **Mechanism, not policy.** A rule only one consumer needs belongs in that consumer. Read both consumers' "Decided against" lists before proposing something shared.
+- **No I/O at import, no logging of values.** A declaration only validates; `resolve()` does the reading.
+- **Errors:** `ConfigError` for what a user configured, `ValueError` for a wrong declaration. A message names the key and expected type, and never holds a secret setting's value.
+- **Every public name has a test here.** interpose's tests guard every consumer at once.
 
 ## Working with AI assistants
 

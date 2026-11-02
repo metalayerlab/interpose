@@ -5,16 +5,42 @@
 
 Shared mechanism for metalayerlab interceptors — the layered settings loader, Secret values, Prometheus text exposition, and a policy-configurable async middleware pipeline.
 
-<!-- guidance: two or three sentences: what problem this solves and for whom. Then delete this comment. -->
+Every metalayerlab interceptor (mitm-proxy, sluice) needs the same settings engine: each setting declared
+once, read from a `_FILE` variable, the environment, a YAML file or its default, and typed strictly. Copies
+of it drifted, so it lives here, with the `Secret` type that keeps secrets out of logs. Settings and secrets
+are v0.1; Prometheus output and the middleware pipeline core follow.
 
 ## Quick Start
 
+Pin a release tag (interpose isn't on PyPI):
+
 ```sh
-uv add git+https://github.com/metalayerlab/interpose
+uv add "interpose @ git+https://github.com/metalayerlab/interpose@v0.1.0"
 ```
 
 ```python
-import interpose
+from pathlib import Path
+
+from interpose.settings import Setting, Settings, one_of, port
+
+SETTINGS = Settings(
+    "MYAPP_",
+    (
+        Setting("log_level", "INFO", "Log level.", check=one_of("DEBUG", "INFO", "ERROR")),
+        Setting("listen.port", 8080, "Port to listen on.", check=port),
+        Setting("upstream.token", "", "API token.", secret=True),
+        Setting("allow.hosts", "", "Hosts to allow.", is_list=True),
+    ),
+    default_path=Path("/etc/myapp/config.yaml"),
+)
+
+r = (
+    SETTINGS.resolve()
+)  # MYAPP_<KEY>_FILE > MYAPP_<KEY> > $MYAPP_CONFIG or the default path > default
+r.values["listen.port"]  # 8080, an int; a YAML 0.5 or true is a ConfigError
+r.sources["listen.port"]  # "default", "file", "MYAPP_LISTEN_PORT" or "MYAPP_LISTEN_PORT_FILE"
+r.values["upstream.token"]  # Secret('********'); .reveal() gives the value
+r.values["allow.hosts"]  # ("example.org", ...) from a YAML list or "a, b"
 ```
 
 The full walk-through is in the wiki's [Quick Start](https://github.com/metalayerlab/interpose/wiki/Quick-Start).
