@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/metalayerlab/interpose/compare/v0.2.0...v0.2.1) (2026-11-02)
+
+
+### 📚 Documentation
+
+* present the components as pipeline, settings, metrics ([#26](https://github.com/metalayerlab/interpose/issues/26)) ([f287221](https://github.com/metalayerlab/interpose/commit/f287221e7d61a6074b769369373e19e8f53cb059))
+
 ## [0.2.0](https://github.com/metalayerlab/interpose/compare/v0.1.5...v0.2.0) (2026-11-02)
 
 
