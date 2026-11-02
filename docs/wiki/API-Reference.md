@@ -108,7 +108,7 @@ The middleware loop and the guard around every hook. interpose defines no hooks 
 - `observe_failed`: whether observer hooks still reach a middleware that has failed.
 - `timeout`: seconds per hook call, unless the middleware says; `None` is no limit.
 - `answers`: exception types a hook raises as its answer (a deny), re-raised unchanged whatever `on_error` says.
-- `skip_inherited`: the project's base class; a hook a middleware doesn't override isn't called (no timing).
+- `skip_inherited`: the project's base class, whose hooks must do nothing; a hook a middleware doesn't override, in its class or on the instance (`mw.pre = gate` counts as an override), isn't called (no timing). In `each` and `before` it counts as returning `None`, so `until` is still asked (a stop that reads the unit's state still happens there); elsewhere it gives `SKIPPED`.
 - Raises `ValueError` for a value outside these.
 
 **`Entry(middleware, name, on_error=None, timeout=None)`**: one middleware in a chain with its own policy (`None`: the project's; a `timeout` of **`NO_LIMIT`** opts it out of the project's limit). Compared by identity. **`Entry.of(middleware, name=None)`** reads the middleware's `name`, `on_error` and `timeout` attributes; `name=` wins. **`name_of(middleware)`**: its `name` attribute if a non-empty `str`, else its class name.
