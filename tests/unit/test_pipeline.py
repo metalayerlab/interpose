@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from interpose.pipeline import (
+    NO_LIMIT,
     SKIPPED,
     Entry,
     Failure,
@@ -380,6 +381,49 @@ def test_the_middlewares_timeout_beats_the_projects() -> None:
     with pytest.raises(HookFailed, match="middleware 'slow' timed out in hook") as e:
         run(r.call(r.entries[0], "hook", lambda: mw.hook()))
     assert e.value.failure.timed_out and isinstance(e.value.__cause__, TimeoutError)
+
+
+def test_a_failure_carries_the_limit_that_applied() -> None:
+    policy = Policy(
+        on_error="skip",
+        after_order="chain",
+        after_local=False,
+        observe_failed=False,
+        timeout=60,
+    )
+    got, report = failures()
+    own, default = Mw("own", sleep=5, timeout=0.01), Mw("default", raises=Boom())
+    r = Pipeline([own, default], policy).start(on_failure=report)
+    run(r.each("hook", lambda mw: mw.hook()))
+    assert [(f.middleware, f.timeout) for f in got] == [("own", 0.01), ("default", 60)]
+    r2 = Pipeline([Mw("none", raises=Boom())], SKIP).start(on_failure=report)
+    run(r2.each("hook", lambda mw: mw.hook()))
+    assert got[-1].timeout is None
+
+
+def test_no_limit_opts_a_middleware_out_of_the_projects_timeout() -> None:
+    policy = Policy(
+        on_error="fail",
+        after_order="chain",
+        after_local=False,
+        observe_failed=False,
+        timeout=0.001,
+    )
+    mw = Mw("slow_auth", sleep=0.02, result="ok", timeout=NO_LIMIT)
+    r = Pipeline([mw], policy).start()
+    assert run(r.call(r.entries[0], "hook", lambda: mw.hook())) == "ok"
+
+
+def test_a_valid_check_that_raises_is_the_middlewares_failure() -> None:
+    got, report = failures()
+    mw = Mw("a", result=object())
+    r = Pipeline([mw], SKIP).start(on_failure=report)
+
+    def valid(result: Any) -> bool:
+        return bool(result.status < 400)
+
+    assert run(r.call(r.entries[0], "hook", lambda: mw.hook(), valid=valid)) is SKIPPED
+    assert isinstance(got[0].error, AttributeError) and r.has_failed(r.entries[0])
 
 
 def test_no_timeout_lets_a_hook_finish() -> None:

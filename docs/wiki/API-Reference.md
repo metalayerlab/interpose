@@ -111,7 +111,7 @@ The middleware loop and the guard around every hook. interpose defines no hooks 
 - `skip_inherited`: the project's base class; a hook a middleware doesn't override isn't called (no timing).
 - Raises `ValueError` for a value outside these.
 
-**`Entry(middleware, name, on_error=None, timeout=None)`**: one middleware in a chain with its own policy (`None`: the project's). Compared by identity. **`Entry.of(middleware, name=None)`** reads the middleware's `name`, `on_error` and `timeout` attributes; `name=` wins. **`name_of(middleware)`**: its `name` attribute if a non-empty `str`, else its class name.
+**`Entry(middleware, name, on_error=None, timeout=None)`**: one middleware in a chain with its own policy (`None`: the project's; a `timeout` of **`NO_LIMIT`** opts it out of the project's limit). Compared by identity. **`Entry.of(middleware, name=None)`** reads the middleware's `name`, `on_error` and `timeout` attributes; `name=` wins. **`name_of(middleware)`**: its `name` attribute if a non-empty `str`, else its class name.
 
 **`Pipeline(middleware, policy)`**: a frozen chain (middleware or `Entry`s) and its policy. `entries`, `names`, `policy`.
 
@@ -131,10 +131,11 @@ The middleware loop and the guard around every hook. interpose defines no hooks 
 | `observe_ran(hook, invoke, *, pairs)` | `invoke(mw, context)`; always fails open | `ran` in `after_order` | `None` |
 | `scoped(entry)` | | | a `ScopedState` |
 
-- **The guard**, around every call: skips a failed entry (observers: unless `observe_failed`) or an inherited hook; times the call into `timings[name]`; bounds it with the entry's or the policy's timeout; re-raises `answers` (not in observers); anything else it raises, or a result `valid` refuses, is a failure: the entry leaves `active`, `on_failure` is called, and under `"fail"` `HookFailed` is raised (under `"skip"`, `SKIPPED` is returned). `CancelledError` is never caught.
+- **The guard**, around every call: skips a failed entry (observers: unless `observe_failed`) or an inherited hook; times the call into `timings[name]`; bounds it with the entry's or the policy's timeout; re-raises `answers` (not in observers); anything else it raises, or a result `valid` refuses (or a `valid` that raises), is a failure: the entry leaves `active`, `on_failure` is called, and under `"fail"` `HookFailed` is raised (under `"skip"`, `SKIPPED` is returned). `CancelledError` is never caught.
 - `keep_none=True` makes a `None` result keep the value (a chunk hook that passes a chunk on).
+- `until` is the project's predicate and must not raise. Under `"fail"`, `start()` raises `HookFailed` when a `select` fails.
 
-**`Failure(middleware, hook, error, timed_out, action)`**: what failed, with what, and whether the guard's timeout did it; `action` is `"skip"` or `"fail"`. Holds no unit data.
+**`Failure(middleware, hook, error, timed_out, action, timeout)`**: what failed, with what, and whether the guard's timeout did it; `action` is `"skip"` or `"fail"`; `timeout` is the limit that applied (seconds, or `None`). Holds no unit data.
 
 **`HookFailed`**: raised under `"fail"`. `failure` is the `Failure`; `__cause__` is what the hook raised (a `TimeoutError` for a timeout). The message names the middleware and the hook, never a value.
 

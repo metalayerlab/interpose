@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import math
 import time
 from collections.abc import Awaitable, Callable, Iterable, Iterator, MutableMapping, Sequence
 from dataclasses import dataclass, field
@@ -32,6 +33,7 @@ from functools import partial
 from typing import Any, Literal, cast, overload
 
 __all__ = [
+    "NO_LIMIT",
     "SKIPPED",
     "Entry",
     "Failure",
@@ -75,6 +77,9 @@ def _check_timeout(timeout: object, where: str) -> None:
         return
     if isinstance(timeout, bool) or not isinstance(timeout, int | float) or not timeout > 0:
         raise ValueError(f"{where}: timeout must be a number of seconds above 0, or None")
+
+
+NO_LIMIT = math.inf  # an entry's timeout that opts out of the project's
 
 
 def _check_on_error(on_error: object, where: str, *, optional: bool) -> None:
@@ -137,6 +142,8 @@ def name_of(middleware: object) -> str:
 class Entry[M]:
     """One middleware in a chain, with its name and its own policy (`None`: the project's).
 
+    `timeout=NO_LIMIT` opts one middleware out of the project's timeout.
+
     Compared by identity: the same middleware twice in a chain is two entries.
     """
 
@@ -174,6 +181,7 @@ class Failure:
     error: Exception
     timed_out: bool
     action: OnError  # what the pipeline did about it
+    timeout: float | None = None  # the limit that applied to the call, in seconds
 
 
 class HookFailed(Exception):
@@ -322,11 +330,17 @@ class Run[M]:
         return getattr(type(entry.middleware), hook, None) is getattr(base, hook)
 
     def _fail(
-        self, entry: Entry[M], hook: str, error: Exception, timed_out: bool, action: OnError
+        self,
+        entry: Entry[M],
+        hook: str,
+        error: Exception,
+        timed_out: bool,
+        action: OnError,
+        timeout: float | None = None,
     ) -> None:
         """Take entry out of the run, report it, and raise if the action is "fail"."""
         self._failed.add(entry)
-        failure = Failure(entry.name, hook, error, timed_out, action)
+        failure = Failure(entry.name, hook, error, timed_out, action, timeout)
         if self.on_failure is not None:
             self.on_failure(failure)
         if action == "fail":
@@ -355,26 +369,28 @@ class Run[M]:
         if self._inherited(entry, hook):
             return SKIPPED
         timeout = entry.timeout if entry.timeout is not None else self.policy.timeout
+        if timeout == NO_LIMIT:
+            timeout = None
         limit = asyncio.timeout(timeout)
         start = time.perf_counter()
         try:
             async with limit:
                 result = await invoke()
+            # Inside the try: a `valid` that raises on an odd result is that result's failure,
+            # handled by on_error like any other, not an exception escaping the pipeline.
+            if valid is not None and not valid(result):
+                raise InvalidResult(f"{hook} returned {type(result).__name__}")
         except Exception as e:
             if not observing and isinstance(e, self.policy.answers):
                 raise
             # A TimeoutError the hook raised itself (its own network call) is an ordinary
             # failure; only the guard's own limit counts as a timeout.
-            self._fail(entry, hook, e, limit.expired(), action)
+            self._fail(entry, hook, e, limit.expired(), action, timeout)
             return SKIPPED
         finally:
             self.timings[entry.name] = (
                 self.timings.get(entry.name, 0.0) + time.perf_counter() - start
             )
-        if valid is not None and not valid(result):
-            error = InvalidResult(f"{hook} returned {type(result).__name__}")
-            self._fail(entry, hook, error, False, action)
-            return SKIPPED
         return result
 
     async def call[R](
@@ -401,7 +417,8 @@ class Run[M]:
         valid: Callable[[R], bool] | None = None,
     ) -> Stopped[M] | None:
         """Call `hook` on each entry (default: `active`) in order, until `until(result)` is
-        true. Returns where it stopped, or `None` if every entry ran."""
+        true (`until` is the project's and must not raise). Returns where it stopped, or `None`
+        if every entry ran."""
         for entry in self.active if entries is None else entries:
             mw = entry.middleware
             result = await self.call(entry, hook, partial(invoke, mw), valid=valid)
@@ -457,9 +474,11 @@ class Run[M]:
         until: Callable[[R], bool] | None = None,
         valid: Callable[[R], bool] | None = None,
     ) -> Stopped[M] | None:
-        """`each`, recording `(entry, context)` in `ran` before each call, so the after phase
-        and observers reach it even if its hook failed. A stop is kept in `stopped`. Call it
-        again with another context and chain (sluice's rename target): `ran` accumulates."""
+        """`each`, recording `(entry, context)` in `ran` before each call, so observers reach
+        it even if its own hook failed (with `observe_failed`); the after phase leaves out what
+        failed. A stop is kept in `stopped`. Call it again with another context and chain
+        (sluice's rename target): `ran` accumulates. `until` is the project's and must not
+        raise."""
         for entry in self.active if entries is None else entries:
             if self.has_failed(entry):
                 continue

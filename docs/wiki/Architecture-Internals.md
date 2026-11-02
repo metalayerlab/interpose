@@ -63,8 +63,8 @@ A project builds a `Pipeline` once (its chain and its `Policy`) and calls `start
 
 1. Skip if the entry has failed (observers: unless `observe_failed`) or `skip_inherited` says the hook isn't overridden.
 2. Time it into `timings[name]` with `time.perf_counter`, failed calls included.
-3. Bound it with `asyncio.timeout` (the entry's timeout, else the policy's). Only the guard's own limit is a timeout (`expired()`); a `TimeoutError` the hook raises is an ordinary failure.
-4. Catch `Exception`. `answers` are re-raised (not by observers). Anything else, or a result `valid` refuses, is a failure: the entry leaves `active`, `on_failure` gets a `Failure`, and `"fail"` raises `HookFailed` from the hook's exception; `"skip"` returns `SKIPPED`.
+3. Bound it with `asyncio.timeout` (the entry's timeout, else the policy's; `NO_LIMIT` means none). Only the guard's own limit is a timeout (`expired()`); a `TimeoutError` the hook raises is an ordinary failure.
+4. Catch `Exception`. `answers` are re-raised (not by observers). Anything else, or a result `valid` refuses (or a `valid` that raises), is a failure: the entry leaves `active`, `on_failure` gets a `Failure`, and `"fail"` raises `HookFailed` from the hook's exception; `"skip"` returns `SKIPPED`.
 
 Every hook is awaited in turn on the caller's task. Nothing is scheduled with `create_task`, which is what carries backpressure from a slow hook back to the reader. Nothing is logged: `on_failure` is where the project logs with its unit ID. `after_pairs()` applies the after-phase policy: what ran, minus what failed, in `after_order`, and nothing after a stop unless `after_local`.
 

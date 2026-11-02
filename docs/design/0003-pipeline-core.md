@@ -23,8 +23,8 @@ The differences are deliberate, and each is written down in a design record:
 | After hooks on a local answer | no: `on_response` never runs after `STOP`/`DENY` (0005) | yes: every middleware whose `pre` ran gets `post` |
 | Observers reach a failed middleware | no: `on_done` skips it (0006) | yes: `failed()` reaches every hook that ran |
 | Timeout | `middleware.hook_timeout_ms`, 5 s | none (`pipeline.slow_ms` only warns about loop blocking) |
-| Rejecting | return `Action.DENY` → 502 naming the middleware | raise `Deny`/`FsError(errno)` |
-| Streaming | chunk hooks, per body chunk | none: a read is already a call |
+| Rejecting | return `Action.DENY` → 403 (request) or 502 (response), naming the middleware | raise `Deny`/`FsError(errno)` |
+| Body hooks | chunk-shaped hooks (`on_request_chunk`, `on_response_chunk`); today called once on the buffered body | none: a read is already a call |
 | Timings | `flow.timings.middleware[name]` | none |
 | Free state | `flow.metadata` | `ctx.state` |
 
@@ -184,9 +184,10 @@ result)`). The `hook` string names it in failures and timings, and is what `skip
 - **`observe`**: a hook that can't change the outcome (`on_done`). **Always fails open**, whatever
   `on_error` says, and `answers` count as failures here: the outcome is already fixed, so there is
   nothing left to protect. Reaches failed middleware only with `observe_failed`.
-- **`before`**: `each`, but records `(entry, context)` in `ran` *before* each call, so the after phase and
-  the observers reach a middleware even if its own before hook failed (sluice's rule), and keeps a stop in
-  `stopped`. Called again with another context and chain (sluice's rename target), `ran` accumulates.
+- **`before`**: `each`, but records `(entry, context)` in `ran` *before* each call, so observers reach a
+  middleware even if its own before hook failed (sluice's `failed()` rule, with `observe_failed`), and
+  keeps a stop in `stopped`. The after phase leaves out what failed: a skipped middleware is out for the
+  rest of the unit. Called again with another context and chain (sluice's rename target), `ran` accumulates.
 - **`after_pairs()`**: what ran, in `after_order`, minus what failed; nothing if a before hook stopped the
   unit and `after_local` is false. **`after`** folds a value over those pairs, each with its own context:
   sluice's `post`.
@@ -204,14 +205,16 @@ Every call goes through one guard:
    hook isn't overridden. The result is `SKIPPED`.
 2. **Time** the call into `timings[entry.name]` (`time.perf_counter`), failed calls included, as
    mitm-proxy does.
-3. **Bound** it with `asyncio.timeout(entry.timeout or policy.timeout)`. Only the guard's own limit counts
+3. **Bound** it with `asyncio.timeout(entry.timeout or policy.timeout)`; an entry's `NO_LIMIT` (`math.inf`)
+   opts it out of the project's limit. Only the guard's own limit counts
    as a timeout (`expired()`): a `TimeoutError` the hook raises from its own network call is an ordinary
    failure.
 4. **Catch** `Exception` (never `CancelledError`, `KeyboardInterrupt` or `SystemExit`). An `answers` type
    is re-raised as it is. Anything else, or a result `valid(result)` refuses (`InvalidResult`, which names
-   the result's type, never its value), is a **failure**:
+   the result's type, never its value), or a `valid` that itself raises, is a **failure**:
    - the entry is out of the run (`active` drops it);
-   - `on_failure(Failure(middleware, hook, error, timed_out, action))` is called, so the project logs and
+   - `on_failure(Failure(middleware, hook, error, timed_out, action, timeout))` is called (`timeout` is
+     the limit that applied), so the project logs and
      counts it (mitm-proxy's `log.exception` and `middleware_failures_total`);
    - under `"fail"`, `HookFailed(failure)` is raised with the hook's exception as its `__cause__`; under
      `"skip"`, the result is `SKIPPED`.
@@ -246,7 +249,7 @@ TLS, scope, CA, control plane; sluice's fusepy) don't touch the core and aren't 
 |---|---|---|---|
 | mitm-proxy | Kill or retry the flow on middleware failure: too disruptive, undefined after side effects (0001) | mitm-proxy's policy is `on_error="skip"`. `"fail"` raises `HookFailed` to the project, which answers with a deny response; nothing kills a connection or retries a hook, anywhere | Failing closed is *answering* (a 403/502), not killing. 0001 itself notes "in a security-enforcement setting, deny-on-error might be better"; only a middleware that declares `on_error="fail"` gets it |
 | mitm-proxy | Priority-number or DAG middleware ordering (0001) | Order is the chain, a plain sequence. `after_order` is that sequence forwards or backwards, no numbers | No ordering input besides the list |
-| mitm-proxy | Buffered-only middleware hooks (0001) | interpose defines no hook signatures. Chunk hooks are `fold` calls the project makes per chunk | Streaming stays possible and is mitm-proxy's |
+| mitm-proxy | Buffered-only middleware hooks (0001) | interpose defines no hook signatures. Chunk hooks are `fold` calls the project makes, once per chunk (today once per buffered body) | The chunk-shaped API stays, and streaming stays mitm-proxy's to add |
 | mitm-proxy | Runtime mutation detection and re-buffering (0001) | Not in the core: `is_mutation_capable` stays in mitm-proxy | The core never inspects bodies |
 | mitm-proxy | Custom backpressure/windowing layer (0001) | Every hook is awaited in turn on the caller's task; nothing buffers or schedules | `drain()` and h2 flow control keep doing the work |
 | mitm-proxy | Resetting the stream on response DENY (0001) | The core has no transport; `HookFailed` and `Stopped` go to the project, which sends its 502 | Unchanged |
@@ -272,10 +275,14 @@ Each changes nothing a consumer can observe by default; each can be reversed bef
 1. **No defaults for the four semantics fields.** A project must write `on_error`, `after_order`,
    `after_local` and `observe_failed`. Recommended: a default would quietly hand one project's semantics to
    the next.
-2. **`"fail"` raises `HookFailed` and the project denies.** For mitm-proxy that will be its existing 502
-   naming the middleware, for a middleware that opts in with `on_error = "fail"`; mitm-proxy's own default
-   stays `"skip"`. This is the one place 0003 touches mitm-proxy's "kill or retry" entry: it is a deny
-   answer, not a kill, as the failure-policy note requires.
+2. **`"fail"` raises `HookFailed` and the project denies.** Only for a middleware that opts in with
+   `on_error = "fail"`; mitm-proxy's own default stays `"skip"`. This is the one place 0003 touches
+   mitm-proxy's "kill or retry" entry: it is a deny answer, not a kill, as the failure-policy note
+   requires. The recommended answer in mitm-proxy is a 502 naming the middleware ("middleware X failed"),
+   in both phases, so a crash stays distinguishable from a deliberate request-phase 403; that status is
+   new behaviour (nothing fails closed today) and is mitm-proxy's adoption record to settle. A selection
+   (`applies_to`) failure of a `"fail"` middleware raises from `start()`, before any hook ran, and gets the
+   same answer.
 3. **Observer hooks always fail open** (`on_done`, `failed`), whatever `on_error` says. Today's behaviour
    in both projects.
 4. **sluice's `FsError` is an answer** (`answers=(FsError,)`): a deliberate deny passes through even from
@@ -319,7 +326,9 @@ Each changes nothing a consumer can observe by default; each can be reversed bef
 - One loop, one guard, one place where failure policy, timeouts and timings are implemented and tested.
   Per-middleware `on_error` and timeout become available to both projects as soon as they adopt it.
 - Cost per hook call: an `asyncio.timeout` context and two clock reads, which mitm-proxy already pays.
-  sluice gains the timing it lacked; `skip_inherited` lets it stop awaiting hooks that do nothing.
+  Measured on the workstation (Python 3.13), a guarded no-op hook takes about 2 µs against 0.1 µs bare:
+  about 10 µs per sluice call with five middleware, small next to a FUSE round trip. sluice gains the
+  timing it lacked; `skip_inherited` lets it stop awaiting hooks that do nothing.
 - **No new dependency.**
 - Wiki: API-Reference (the module), Architecture-Internals (the guard and the policies), Introduction,
   Testing-Guide.
@@ -341,18 +350,25 @@ What each project's switch will need (each writes its own design record first; t
    timeout=hook_timeout)`.
 3. `start(flow, on_failure)` → `start(select=lambda mw: mw.applies_to(flow), select_hook="applies_to",
    on_failure=..., timings=flow.timings.middleware, state=flow.metadata)`. The `on_failure` callback logs
-   (`log.error(..., exc_info=failure.error)` with `flow.id`; "timed out after Ns" when
+   (`log.error(..., exc_info=failure.error)` with `flow.id`; "timed out after {failure.timeout}s" when
    `failure.timed_out`) and calls `metrics.middleware_failures.inc(failure.middleware)`.
-4. `run_request`/`run_response` → `each(hook, lambda mw: mw.on_request(flow), until=lambda r: r is not
+4. `run_request` → `before("on_request", flow, lambda mw, f: mw.on_request(f), until=lambda r: r is not
    None and r is not Action.CONTINUE, valid=lambda r: r is None or isinstance(r, Action))`, mapping
-   `Stopped` to `Outcome(action, by=entry.name)`. The response phase keeps running over `active` (not
-   `after_pairs()`), because an oversize request body skips the request phase but not the response one.
-5. Chunk hooks → `fold(hook, chunk, lambda mw, c: mw.on_request_chunk(flow, c, is_last), keep_none=True,
-   valid=lambda r: r is None or isinstance(r, bytes | bytearray | memoryview))`, then `bytes(...)`.
-6. `run_done` → `observe("on_done", lambda mw: mw.on_done(flow), entries=run.active)`.
-7. New, opt-in: a middleware's `on_error = "fail"` makes `run_*` raise `HookFailed`; `exchange.py` answers
-   it with the existing 502 deny naming `failure.middleware`. Needs a test that a crashing gate blocks the
-   flow. A per-middleware timeout attribute works the same way.
+   `Stopped` to `Outcome(action, by=entry.name)`. `run_response` → the same with `each("on_response",
+   ..., entries=[e for e, _ in run.after_pairs()])`, so `after_local=False` is what keeps `on_response`
+   off local answers (0005) rather than only `exchange.py`'s early return. An oversize request body sets
+   both `request_skipped` and `response_skipped` (`_oversize`), so both phases are skipped there, as
+   today.
+5. Chunk hooks → `fold(hook, chunk, invoke, keep_none=True)`, where `invoke` awaits
+   `mw.on_request_chunk(flow, c, is_last)` and returns `None` or `bytes(result)`, so every middleware still
+   gets `bytes` from the one before (today's `chunk = bytes(result)` per middleware); a result `bytes()`
+   can't take (a `str`) fails inside the guard, as the "not bytes" check does today.
+6. `run_done` → `observe("on_done", lambda mw: mw.on_done(flow))`: the selected entries, where
+   `observe_failed=False` skips the failed ones (0006).
+7. New, opt-in: a middleware's `on_error = "fail"` makes `run_*` raise `HookFailed`, and `start()` too
+   when its `applies_to` raises; `exchange.py` answers it with a deny naming `failure.middleware`
+   (decision 2) and runs `run_done` when a run exists. Needs a test that a crashing gate blocks the flow.
+   A per-middleware `timeout` attribute (or `NO_LIMIT`) works the same way.
 8. Log wording for an invalid result changes from the result's `repr` to its type name (never log values).
 9. Audit existing middleware for attributes called `name`, `on_error` or `timeout` that mean something
    else (an upstream client's `timeout`, say): `Entry.of` reads them. Rename them, or build the `Entry`
@@ -373,10 +389,12 @@ What each project's switch will need (each writes its own design record first; t
    record decides (`ETIMEDOUT` or `EIO`). Then `observe_ran("failed", lambda mw, c: mw.failed(c, err))`;
    for a `param()` failure, pass the whole chain as `pairs=`.
 6. `failed()` exceptions: today `log.exception`ed and ignored; with `observe_ran` they reach `on_failure`,
-   which logs them the same way.
+   which logs them the same way. `on_failure` also sees the `"fail"` failure that ends the call, which
+   `_as_fs_error` already logs: log only `action == "skip"` failures there, or stop logging in the mapper.
 7. New, opt-in: `on_error = "skip"` on an observer-like middleware (the access-log example) so its crash
    no longer fails the user's call; a timeout setting (decision 7).
-8. Optional: `require_async` replaces `check_coroutine`.
+8. Optional: `require_async` can back `check_coroutine`, re-raised as `RouteError` so a sync hook stays a
+   one-line exit-2 error.
 9. The same attribute audit as mitm-proxy's item 9; sluice's `FunctionMiddleware` gets the wrapped
    function's name (today its `repr` is the function's `__qualname__`).
 
