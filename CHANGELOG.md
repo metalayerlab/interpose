@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/metalayerlab/interpose/compare/v0.1.3...v0.1.4) (2026-11-02)
+
+
+### ✨ Features
+
+* treat hook results that come back after their limit as timeouts ([#18](https://github.com/metalayerlab/interpose/issues/18)) ([3d037a9](https://github.com/metalayerlab/interpose/commit/3d037a97ad997e24be5fc9c90709fbd10d954d4f))
+
 ## [0.1.3](https://github.com/metalayerlab/interpose/compare/v0.1.2...v0.1.3) (2026-11-02)
 
 
