@@ -104,8 +104,10 @@ class Policy:
     - `timeout`: seconds per hook call, unless the middleware says; `None` is no limit.
     - `answers`: exception types a hook raises *as its answer* (sluice's `FsError`), re-raised
       unchanged whatever `on_error` says. Everything else a hook raises is a failure.
-    - `skip_inherited`: the project's base class; a hook a middleware doesn't override isn't
-      called at all (no timing, no result). `None` calls every hook.
+    - `skip_inherited`: the project's base class, whose hooks must do nothing; a hook a
+      middleware doesn't override (in its class or on the instance) isn't called at all (no
+      timing). In `each` and `before` it counts as having returned `None`, so `until` is still
+      asked; elsewhere it gives `SKIPPED`. `None` calls every hook.
     """
 
     on_error: OnError
@@ -324,10 +326,18 @@ class Run[M]:
         return entry.on_error or self.policy.on_error
 
     def _inherited(self, entry: Entry[M], hook: str) -> bool:
+        """Whether `skip_inherited` says not to call this hook: the base defines it and the
+        middleware neither overrides it in its class nor sets it on the instance."""
         base = self.policy.skip_inherited
         if base is None or not hasattr(base, hook):
             return False
-        return getattr(type(entry.middleware), hook, None) is getattr(base, hook)
+        mw = entry.middleware
+        # A hook assigned on the instance (`mw.pre = gate`) is an override too: looking at the
+        # class alone would skip it, and a skipped gate fails open (issue #12).
+        own = getattr(mw, "__dict__", None)
+        if own is not None and hook in own:
+            return False
+        return getattr(type(mw), hook, None) is getattr(base, hook)
 
     def _fail(
         self,
@@ -363,10 +373,11 @@ class Run[M]:
         action: OnError,
         valid: Callable[[R], bool] | None,
         observing: bool = False,
+        check_inherited: bool = True,
     ) -> R | _Skipped:
         if entry in self._failed and not (observing and self.policy.observe_failed):
             return SKIPPED
-        if self._inherited(entry, hook):
+        if check_inherited and self._inherited(entry, hook):
             return SKIPPED
         timeout = entry.timeout if entry.timeout is not None else self.policy.timeout
         if timeout == NO_LIMIT:
@@ -405,6 +416,23 @@ class Run[M]:
         failed, or not overridden). Raises `HookFailed` under "fail"; answers pass through."""
         return await self._guard(entry, hook, invoke, self._action(entry), valid)
 
+    async def _step[R](
+        self,
+        entry: Entry[M],
+        hook: str,
+        invoke: Callable[[], Awaitable[R]],
+        valid: Callable[[R], bool] | None,
+    ) -> R | _Skipped | None:
+        """A call in a phase that can stop (`each`, `before`). A hook `skip_inherited` leaves
+        out counts as the base's no-op: `None`, so `until` is still asked. A stop that depends
+        on the unit's state (sluice's `ctx.responded`, set by a `param()` callback) then ends
+        the phase where it would have if the hook had been awaited (issue #12)."""
+        if entry not in self._failed and self._inherited(entry, hook):
+            return None
+        return await self._guard(
+            entry, hook, invoke, self._action(entry), valid, check_inherited=False
+        )
+
     # Phases over a single context
 
     async def each[R](
@@ -421,7 +449,7 @@ class Run[M]:
         if every entry ran."""
         for entry in self.active if entries is None else entries:
             mw = entry.middleware
-            result = await self.call(entry, hook, partial(invoke, mw), valid=valid)
+            result = await self._step(entry, hook, partial(invoke, mw), valid)
             if result is SKIPPED:
                 continue
             if until is not None and until(cast(R, result)):
@@ -484,7 +512,7 @@ class Run[M]:
                 continue
             self.ran.append((entry, context))
             mw = entry.middleware
-            result = await self.call(entry, hook, partial(invoke, mw, context), valid=valid)
+            result = await self._step(entry, hook, partial(invoke, mw, context), valid)
             if result is SKIPPED:
                 continue
             if until is not None and until(cast(R, result)):

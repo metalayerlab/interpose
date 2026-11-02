@@ -2,7 +2,7 @@
 
 <!-- Add a line for this record to the index in docs/design/README.md (CI checks). -->
 
-Status: Implemented
+Status: Implemented; decisions confirmed in [0004](0004-pipeline-core-decisions.md), which fixes decision 6
 Date: 2026-11-02
 Authors: andronics; drafted by Claude
 

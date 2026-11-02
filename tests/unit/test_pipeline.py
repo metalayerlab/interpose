@@ -530,6 +530,132 @@ def test_without_skip_inherited_every_hook_is_called() -> None:
     assert "Inherits" in r.timings
 
 
+def test_skip_inherited_calls_a_hook_set_on_the_instance() -> None:
+    # Issue #12: the override check looked at the class only, so a gate assigned on the
+    # instance (sluice's `as_middleware` accepts one) was never run: it failed open.
+    class Inherits(Base):
+        pass
+
+    policy = Policy(
+        on_error="fail",
+        after_order="chain",
+        after_local=False,
+        observe_failed=False,
+        skip_inherited=Base,
+    )
+    gated, plain = Inherits(), Inherits()
+
+    async def gate(arg: Any = None) -> str:
+        return "gate"
+
+    gated.hook = gate  # type: ignore[method-assign]  # the instance attribute is what's tested
+    r = Pipeline([Entry(gated, "gated"), Entry(plain, "plain")], policy).start()
+    a, b = r.entries
+    assert run(r.call(a, "hook", lambda: gated.hook())) == "gate"
+    assert run(r.call(b, "hook", lambda: plain.hook())) is SKIPPED
+    stopped = run(r.each("hook", lambda mw: mw.hook(), until=lambda x: x == "gate"))
+    assert stopped is not None and stopped.entry is a
+    assert "gated" in r.timings and "plain" not in r.timings
+
+
+def test_skip_inherited_works_for_middleware_without_an_instance_dict() -> None:
+    class SlotBase:
+        __slots__ = ()
+
+        async def hook(self) -> Any:
+            return None
+
+    class Overrides(SlotBase):
+        __slots__ = ()
+
+        async def hook(self) -> Any:
+            return "mine"
+
+    class Inherits(SlotBase):
+        __slots__ = ()
+
+    policy = Policy(
+        on_error="fail",
+        after_order="chain",
+        after_local=False,
+        observe_failed=False,
+        skip_inherited=SlotBase,
+    )
+    over, inh = Overrides(), Inherits()
+    r = Pipeline([Entry(over, "over"), Entry(inh, "inh")], policy).start()
+    a, b = r.entries
+    assert run(r.call(a, "hook", over.hook)) == "mine"
+    assert run(r.call(b, "hook", inh.hook)) is SKIPPED
+
+
+def test_an_inherited_hook_in_a_phase_counts_as_returning_none() -> None:
+    # Issue #12: a hook skip_inherited leaves out still lets `until` decide, as if the base's
+    # no-op had run and returned None: a result-based stop carries on, a state-based one stops.
+    class Overrides(Base):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def hook(self) -> Any:
+            self.calls += 1
+            return None
+
+    class Inherits(Base):
+        pass
+
+    policy = Policy(
+        on_error="fail",
+        after_order="chain",
+        after_local=False,
+        observe_failed=False,
+        skip_inherited=Base,
+    )
+    inh, over = Inherits(), Overrides()
+    p: Pipeline[Base] = Pipeline([Entry[Base](inh, "inh"), Entry[Base](over, "over")], policy)
+    seen: list[Any] = []
+
+    def result_stop(x: Any) -> bool:
+        seen.append(x)
+        return x is not None
+
+    r = p.start()
+    assert run(r.each("hook", lambda mw: mw.hook(), until=result_stop)) is None
+    assert seen == [None, None] and over.calls == 1
+    assert "inh" not in r.timings
+
+    r = p.start()
+    stopped = run(r.before("hook", "ctx", lambda mw, c: mw.hook(), until=lambda _: True))
+    assert stopped is not None and stopped.entry.middleware is inh and stopped.result is None
+    assert r.ran == [(r.entries[0], "ctx")] and over.calls == 1
+    stopped = run(r.each("hook", lambda mw: mw.hook(), until=lambda _: True))
+    assert stopped is not None and stopped.entry.middleware is inh
+
+
+def test_a_failed_entry_with_an_inherited_hook_stays_skipped_in_a_phase() -> None:
+    class Inherits(Base):
+        async def seen(self, ctx: Any = None) -> None:
+            raise Boom
+
+    mw = Inherits()
+    policy = Policy(
+        on_error="skip",
+        after_order="chain",
+        after_local=False,
+        observe_failed=False,
+        skip_inherited=Base,
+    )
+    r = Pipeline([Entry(mw, "inh")], policy).start()
+    entry = r.entries[0]
+    assert run(r.call(entry, "seen", mw.seen)) is SKIPPED and r.has_failed(entry)
+    asked: list[Any] = []
+
+    def ask(x: Any) -> bool:
+        asked.append(x)
+        return True
+
+    assert run(r.each("hook", lambda m: m.hook(), entries=[entry], until=ask)) is None
+    assert asked == []
+
+
 def test_skipped_is_falsy_and_named() -> None:
     assert not SKIPPED
     assert repr(SKIPPED) == "SKIPPED"
@@ -995,6 +1121,39 @@ def test_sluice_semantics_inherited_hooks_are_not_awaited_and_ops_select() -> No
     p = Pipeline([PreOnly()], SLUICE)
     assert run(sluice_call(p)) == "data"
     assert run(sluice_call(p, op="write")) == "data"
+
+
+def test_sluice_semantics_a_respond_before_the_pre_phase_stops_after_the_first_pre() -> None:
+    # Issue #12, sluice's case: a param() callback answers before any pre hook. sluice checks
+    # `ctx.responded` after each pre, so the first (here inherited) pre ends the phase and the
+    # next middleware's pre never runs; post still reaches the first.
+    log: list[str] = []
+
+    class PostOnly(Recorder):
+        pre = SluiceMiddleware.pre
+
+    p = Pipeline([PostOnly("a", log), Recorder("b", log)], SLUICE)
+    ctx: dict[str, Any] = {"op": "read", "response": "from-param"}
+    r = p.start(state=ctx)
+    phase = r.before("pre", ctx, lambda mw, c: mw.pre(c), until=lambda _: "response" in ctx)
+    assert run(phase) is not None
+    assert run(r.after("post", ctx["response"], lambda mw, c, v: mw.post(c, v))) == "from-param>a"
+    assert log == ["post:a"]
+
+
+def test_sluice_semantics_a_pre_set_on_the_instance_runs() -> None:
+    log: list[str] = []
+    mw = SluiceMiddleware()
+
+    async def gate(ctx: dict[str, Any]) -> None:
+        log.append("gate")
+        raise FsError(errno.EACCES)
+
+    mw.pre = gate  # type: ignore[method-assign]  # the instance attribute is what's tested
+    with pytest.raises(FsError) as e:
+        run(sluice_call(Pipeline([Entry(mw, "gated")], SLUICE)))
+    assert e.value.errno == errno.EACCES
+    assert log == ["gate"]
 
 
 def test_run_exposes_its_policy() -> None:
