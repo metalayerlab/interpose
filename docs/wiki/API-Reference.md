@@ -100,4 +100,4 @@ interpose doesn't serve the text: an HTTP endpoint or a virtual file is the proj
 
 The public API follows [semantic versioning](https://semver.org/): breaking changes only in a major release (a minor one before 1.0), and they're announced in the CHANGELOG.
 
-Everything above is stable within 0.1.x, `interpose.metrics` included once released. The message text of `ConfigError` and `ValueError` is for people: match on the exception type, not the words.
+Everything above is stable within 0.1.x. The message text of `ConfigError` and `ValueError` is for people: match on the exception type, not the words.
