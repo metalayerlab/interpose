@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.0](https://github.com/metalayerlab/interpose/compare/v0.1.5...v0.2.0) (2026-11-02)
+
+
+### ⚠ BREAKING CHANGES
+
+* one_of no longer keeps the case a value was given in (LOG_LEVEL=info resolves to "INFO" when "INFO" is declared), and a check's non-None return value is no longer ignored.
+
+### ✨ Features
+
+* let checks replace values, one_of gives the declared spelling, typed Resolved accessors ([#22](https://github.com/metalayerlab/interpose/issues/22)) ([40aa8d3](https://github.com/metalayerlab/interpose/commit/40aa8d302cf0e65e02dab2dc9278feaed59fe384))
+
 ## [0.1.5](https://github.com/metalayerlab/interpose/compare/v0.1.4...v0.1.5) (2026-11-02)
 
 
