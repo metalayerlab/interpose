@@ -5,11 +5,16 @@ the team (and its AI assistants) should know at a glance.
 
 ## Open
 
-- [ ] Write docs/design/0001-initial-design.md (docs/ai/prompts.md, prompt 1)
-- [ ] Replace every `<!-- guidance -->` comment in docs/wiki/ (a Release PR is blocked until then)
+- [ ] Consumers hear about new tags: Dependabot's `uv` ecosystem can't update a tag-pinned `git+https`
+  dependency (design 0001, open question 4). Until [dependabot-core#16151](https://github.com/dependabot/dependabot-core/pull/16151)
+  lands, each consumer needs a scheduled workflow that opens a PR when interpose has a newer tag; it belongs
+  in the template that generates consumers (template-python), not here. Revisit when #16151 merges: it
+  covers `[tool.uv.sources]` `tag =` only.
+- [ ] Design 0002 (metrics) and 0003 (pipeline core), after the consumers switch to v0.1.
 
 ## Decided against (don't re-propose without reading this first)
 
-<!-- One line each: the idea, why not, and a link to the issue, PR or design record. For example:
-- Helm chart: kustomize base + Flux overlays cover our clusters; a chart doubles the maintenance (design 0003).
--->
+- pydantic-settings or dynaconf: heavy, their own precedence and `_FILE` rules, no per-setting `help` for the generated wiki (design 0001).
+- Publishing to PyPI: consumers are our own repos and pin a GitHub tag (design 0001).
+- A template-owned engine file instead of a library: covers settings only; `Secret`, metrics and the pipeline don't belong in every project (design 0001).
+- A float setting type: no setting needs one; time settings are integer `_ms` (design 0001).

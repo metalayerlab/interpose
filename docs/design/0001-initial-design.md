@@ -2,7 +2,7 @@
 
 <!-- Add a line for this record to the index in docs/design/README.md (CI checks). -->
 
-Status: Proposed
+Status: Implemented (v0.1.0)
 Date: 2026-11-01
 Authors: andronics; drafted by Claude
 
@@ -59,28 +59,28 @@ The submodules are the public API. Anything starting with `_` is private.
 ```python
 @dataclass(frozen=True)
 class Setting:
-    key: str                         # dotted: "listen.port"
+    key: str  # dotted: "listen.port"
     default: str | int | bool
-    help: str                        # Markdown, as users read it in the generated wiki table
+    help: str  # Markdown, as users read it in the generated wiki table
     secret: bool = False
-    is_list: bool = False            # a YAML list, or a comma-separated string; default ""
-    check: Callable[[Value], None] | None = None   # raises ValueError with a reason
-    prefix: str = ""                 # set by Settings, never by hand
+    is_list: bool = False  # a YAML list, or a comma-separated string; default ""
+    check: Callable[[Value], None] | None = None  # raises ValueError with a reason
+    prefix: str = ""  # set by Settings, never by hand
 
     @property
-    def env(self) -> str: ...        # prefix + KEY.upper().replace(".", "_")
+    def env(self) -> str: ...  # prefix + KEY.upper().replace(".", "_")
 
 
 class Settings(Sequence[Setting]):
     def __init__(
         self,
-        prefix: str,                 # "SLUICE_"
+        prefix: str,  # "SLUICE_"
         settings: Iterable[Setting],
         *,
-        default_path: Path,          # /etc/sluice/config.yaml
+        default_path: Path,  # /etc/sluice/config.yaml
     ) -> None: ...
 
-    config_env: str                  # prefix + "CONFIG"
+    config_env: str  # prefix + "CONFIG"
 
     def resolve(
         self, path: Path | None = None, environ: Mapping[str, str] | None = None
@@ -89,8 +89,8 @@ class Settings(Sequence[Setting]):
 
 @dataclass(frozen=True)
 class Resolved:
-    values: Mapping[str, Value]      # key -> typed value; secret settings are Secret
-    sources: Mapping[str, str]       # key -> "SLUICE_X_FILE" | "SLUICE_X" | "file" | "default"
+    values: Mapping[str, Value]  # key -> typed value; secret settings are Secret
+    sources: Mapping[str, str]  # key -> "SLUICE_X_FILE" | "SLUICE_X" | "file" | "default"
 
 
 class ConfigError(Exception): ...
@@ -137,9 +137,12 @@ ConfigError` and the CLI's "one line, exit 2" behaviour stay as they are.
 ```python
 class Secret:
     """str() and repr() are masked; reveal() gives the value. Equality compares values."""
+
     def reveal(self) -> str: ...
 
+
 MASK = "********"
+
 
 def read_secret_dir(directory: Path) -> Mapping[str, Secret]:
     """Each regular file -> Secret(text minus one trailing newline). Missing dir -> empty.
@@ -198,17 +201,59 @@ by accident.
 
 ## Open questions
 
+Answered when v0.1.0 was implemented, each with the recommended answer.
+
 1. **Should `secret=True` values resolve to `Secret`?** Recommend yes. It's the only change consumers
    notice, but the point of the type is that a secret can't be logged by accident, and settings are
-   where secrets enter.
+   where secrets enter. **Answer: yes.**
 2. **A per-setting `check`, or all validation in `load_config`?** Recommend `check` for single-value
    rules (ports, positives, choices). Both consumers repeat these helpers, and the error message format
-   becomes uniform. Cross-setting rules stay in the project.
+   becomes uniform. Cross-setting rules stay in the project. **Answer: `check`.**
 3. **Should v0.1 also include sluice's env allowlist (`env.expose` → a frozen mapping)?** Recommend not
    yet. It's six lines, and mitm-proxy's middleware-config design will show whether it's the right shape.
+   **Answer: not in v0.1.** `env.expose` is an `is_list` setting; its names rule stays in sluice.
 4. **How do consumers hear about a new interpose tag?** I haven't verified that Dependabot's `uv` support
    updates `git+https` dependencies pinned to a tag. Recommend checking before approval. The fallback is
    a scheduled workflow in each consumer that opens a PR when a newer tag exists.
+   **Answer (checked 2026-11-02): no, in either form.** The `uv` ecosystem's parser drops a PEP 508
+   URL (`interpose @ git+https://...@vX.Y.Z`) and keeps only the name, so Dependabot looks `interpose`
+   up on PyPI, finds nothing, and opens no PR; `uv.lock` entries with a git source are skipped, and a
+   `[tool.uv.sources]` `git` + `tag` entry is parsed the same way
+   ([dependabot-core `uv/helpers/lib/parser.py`](https://github.com/dependabot/dependabot-core/blob/85379652/uv/helpers/lib/parser.py#L35-L51),
+   [#16129](https://github.com/dependabot/dependabot-core/issues/16129), open;
+   [#16132](https://github.com/dependabot/dependabot-core/pull/16132), merged 2026-09-11, lists this
+   case as not covered). [#16151](https://github.com/dependabot/dependabot-core/pull/16151) ("Update uv
+   dependencies pinned to a git tag", open, in review) would bump `tag = "..."` in `[tool.uv.sources]`
+   only, not the PEP 508 form. GitHub's docs don't mention git dependencies for `uv`. So consumers need
+   the fallback workflow for now (or the `[tool.uv.sources]` form, if #16151 lands). And because
+   Dependabot asks PyPI for the bare name, a package registered there as `interpose` later would be
+   proposed as an update: review any Dependabot PR for `interpose` with that in mind.
 5. **Name (resolved 2026-11-01):** `weir`, the first choice, is taken on PyPI (a ZFS API, v0.4.0), and
    an installed copy would shadow the import even though we never publish there. `interpose` was free on
    PyPI and GitHub, so the repo was generated under that name. Nothing to answer.
+
+## Implementation notes (v0.1.0)
+
+Where the text above left a choice, v0.1.0 made these:
+
+- **Declaration errors are `ValueError`**, raised by `Settings(...)` at import of the consumer's
+  `config.py`; `ConfigError` is for the configuration a user gives.
+- **`Settings` also rejects** two settings that read the same variable (`a.b` and `a_b`; `x_file`
+  and `x`'s `_FILE`; a key `config` and `<PREFIX>CONFIG`), and key parts pyyaml doesn't load as
+  strings (`on`, `no`, `null`, `1`), whose YAML value would never be found.
+- **A secret setting must be a `str` setting** (not a list, int or bool): a `Secret` holds one string.
+- **bool** also takes a YAML `1` or `0`, the same spelling as the strings `"1"` and `"0"`.
+- **int** takes ASCII decimal digits with an optional sign (`int()` also takes `"1_000"`). A YAML
+  `1_000` is still `1000`: pyyaml (YAML 1.1) types it as an int before interpose sees it.
+- **str** takes a YAML scalar: a string, int, float, bool or date (`true` gives `"True"`). Collections,
+  binary and sets are errors.
+- **A YAML `null` means unset**, and so does a scalar where a mapping is expected, as in the three copies.
+  Unknown YAML keys are ignored.
+- **`check` runs on every value, the default included**, and a secret setting's value is replaced with
+  `MASK` in the check's reason, as written and as `repr()`/`ascii()` escape it. A coercion error for a secret setting names the key and type only.
+- **YAML syntax errors give the line and column, never the text**: pyyaml's message quotes the line,
+  which may hold a secret.
+- **`Secret`** also has `__bool__` (set or not, as mitm-proxy's config hash asks), `__format__` (masked
+  for any format spec), constant-time `__eq__`, and refuses anything but a `str`.
+- **`read_secret_dir`'s errors name the directory**, not a setting key: it doesn't know the key.
+- **Pinning tags is documented on Quick-Start, not Release-Process**, which is template-owned.
