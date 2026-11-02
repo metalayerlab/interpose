@@ -41,7 +41,6 @@ import math
 import time
 from collections.abc import Awaitable, Callable, Iterable, Iterator, MutableMapping, Sequence
 from dataclasses import dataclass, field
-from functools import partial
 from typing import Any, Literal, cast, overload
 
 __all__ = [
@@ -84,6 +83,10 @@ class _Skipped:
 
 
 SKIPPED = _Skipped()
+# What the guard gives for a hook `skip_inherited` leaves out. Private: `call`, `fold`, `after`
+# and observers turn it into SKIPPED (or keep the value); `each` and `before` into None.
+_INHERITED = _Skipped()
+_clock = time.perf_counter
 
 
 def _check_timeout(timeout: object, where: str) -> None:
@@ -341,6 +344,10 @@ class Run[M]:
     stopped: Stopped[M] | None = field(default=None, init=False)
     # Entries hash by identity (eq=False), so the same middleware twice is two entries.
     _failed: set[Entry[M]] = field(default_factory=set, init=False, repr=False)
+    # `active`, cached: rebuilt when an entry fails (`_fail` drops it) or when `entries` no
+    # longer equals the copy it was built from (start() appends; a project may change it).
+    _active_list: list[Entry[M]] | None = field(default=None, init=False, repr=False)
+    _active_from: list[Entry[M]] = field(default_factory=list, init=False, repr=False)
 
     @property
     def policy(self) -> Policy:
@@ -349,7 +356,17 @@ class Run[M]:
     @property
     def active(self) -> list[Entry[M]]:
         """The selected entries that haven't failed, in chain order."""
-        return [e for e in self.entries if e not in self._failed]
+        return list(self._active())
+
+    def _active(self) -> list[Entry[M]]:
+        """`active` without the copy, for the phases. Never mutated in place."""
+        cached = self._active_list
+        # List equality checks identity first, and entries compare by identity: cheap.
+        if cached is None or self._active_from != self.entries:
+            failed = self._failed
+            cached = self._active_list = [e for e in self.entries if e not in failed]
+            self._active_from = list(self.entries)
+        return cached
 
     def has_failed(self, entry: Entry[M]) -> bool:
         return entry in self._failed
@@ -388,6 +405,7 @@ class Run[M]:
     ) -> None:
         """Take entry out of the run, report it, and raise if the action is "fail"."""
         self._failed.add(entry)
+        self._active_list = None
         failure = Failure(entry.name, hook, error, timed_out, action, timeout, late)
         if self.on_failure is not None:
             self.on_failure(failure)
@@ -403,30 +421,41 @@ class Run[M]:
             self._fail(entry, hook, e, False, self._action(entry))
             return False
 
-    async def _guard[R](
+    async def _guard(
         self,
         entry: Entry[M],
         hook: str,
-        invoke: Callable[[], Awaitable[R]],
-        action: OnError,
-        valid: Callable[[R], bool] | None,
-        observing: bool = False,
-        check_inherited: bool = True,
-    ) -> R | _Skipped:
-        if entry in self._failed and not (observing and self.policy.observe_failed):
+        invoke: Callable[..., Awaitable[Any]],
+        args: tuple[Any, ...],
+        valid: Callable[[Any], bool] | None,
+        observing: bool,
+    ) -> Any:
+        """The one guarded call: `invoke(*args)`, its result, `SKIPPED`, or `_INHERITED` (a hook
+        `skip_inherited` leaves out; each caller decides what that means). The hook's arguments
+        come as `args` rather than a `partial`, and every phase awaits this directly, so a call
+        is one coroutine frame (design 0006)."""
+        policy = self.pipeline.policy
+        if entry in self._failed and not (observing and policy.observe_failed):
             return SKIPPED
-        if check_inherited and self._inherited(entry, hook):
-            return SKIPPED
-        timeout = entry.timeout if entry.timeout is not None else self.policy.timeout
+        if policy.skip_inherited is not None and self._inherited(entry, hook):
+            return _INHERITED
+        timeout = entry.timeout
+        if timeout is None:
+            timeout = policy.timeout
         if timeout == NO_LIMIT:
             timeout = None
-        limit = asyncio.timeout(timeout)
+        limit: asyncio.Timeout | None = None
         late: Late | None = None
-        start = time.perf_counter()
+        start = _clock()
         try:
-            async with limit:
-                result = await invoke()
-            if timeout is not None:
+            if timeout is None:
+                # No limit, no `asyncio.timeout`: it would never fire, and entering it costs
+                # more than the rest of the guard (design 0006).
+                result = await invoke(*args)
+            else:
+                limit = asyncio.timeout(timeout)
+                async with limit:
+                    result = await invoke(*args)
                 late = _late(limit)
                 if late is not None:
                     # The result is discarded: a caller that set a limit never gets a late
@@ -437,17 +466,17 @@ class Run[M]:
             if valid is not None and not valid(result):
                 raise InvalidResult(f"{hook} returned {type(result).__name__}")
         except Exception as e:
-            if late is None and not observing and isinstance(e, self.policy.answers):
+            if late is None and not observing and isinstance(e, policy.answers):
                 raise
             # A TimeoutError the hook raised itself (its own network call) is an ordinary
             # failure; only the guard's own limit counts as a timeout.
-            timed_out = late is not None or limit.expired()
+            timed_out = late is not None or (limit is not None and limit.expired())
+            action: OnError = "skip" if observing else self._action(entry)
             self._fail(entry, hook, e, timed_out, action, timeout, late)
             return SKIPPED
         finally:
-            self.timings[entry.name] = (
-                self.timings.get(entry.name, 0.0) + time.perf_counter() - start
-            )
+            timings, name = self.timings, entry.name
+            timings[name] = timings.get(name, 0.0) + _clock() - start
         return result
 
     async def call[R](
@@ -460,24 +489,8 @@ class Run[M]:
     ) -> R | _Skipped:
         """One guarded hook call: its result, or `SKIPPED` (failed under "skip", already
         failed, or not overridden). Raises `HookFailed` under "fail"; answers pass through."""
-        return await self._guard(entry, hook, invoke, self._action(entry), valid)
-
-    async def _step[R](
-        self,
-        entry: Entry[M],
-        hook: str,
-        invoke: Callable[[], Awaitable[R]],
-        valid: Callable[[R], bool] | None,
-    ) -> R | _Skipped | None:
-        """A call in a phase that can stop (`each`, `before`). A hook `skip_inherited` leaves
-        out counts as the base's no-op: `None`, so `until` is still asked. A stop that depends
-        on the unit's state (sluice's `ctx.responded`, set by a `param()` callback) then ends
-        the phase where it would have if the hook had been awaited (issue #12)."""
-        if entry not in self._failed and self._inherited(entry, hook):
-            return None
-        return await self._guard(
-            entry, hook, invoke, self._action(entry), valid, check_inherited=False
-        )
+        result = await self._guard(entry, hook, invoke, (), valid, False)
+        return SKIPPED if result is _INHERITED else cast(R, result)
 
     # Phases over a single context
 
@@ -493,12 +506,14 @@ class Run[M]:
         """Call `hook` on each entry (default: `active`) in order, until `until(result)` is
         true (`until` is the project's and must not raise). Returns where it stopped, or `None`
         if every entry ran."""
-        for entry in self.active if entries is None else entries:
-            mw = entry.middleware
-            result = await self._step(entry, hook, partial(invoke, mw), valid)
+        guard = self._guard
+        for entry in self._active() if entries is None else entries:
+            result = await guard(entry, hook, invoke, (entry.middleware,), valid, False)
             if result is SKIPPED:
                 continue
-            if until is not None and until(cast(R, result)):
+            if result is _INHERITED:
+                result = None  # the base's no-op: `until` is still asked (issue #12)
+            if until is not None and until(result):
                 return Stopped(entry, result)
         return None
 
@@ -514,12 +529,12 @@ class Run[M]:
     ) -> V:
         """Thread `value` through `hook` on each entry (default: `active`): each result replaces
         it. A skipped call keeps it, and so does `None` with `keep_none=True`."""
-        for entry in self.active if entries is None else entries:
-            mw, current = entry.middleware, value
-            result = await self.call(entry, hook, partial(invoke, mw, current), valid=valid)
-            if result is SKIPPED or (keep_none and result is None):
+        guard = self._guard
+        for entry in self._active() if entries is None else entries:
+            result = await guard(entry, hook, invoke, (entry.middleware, value), valid, False)
+            if result is SKIPPED or result is _INHERITED or (keep_none and result is None):
                 continue
-            value = cast(V, result)
+            value = result
         return value
 
     async def observe(
@@ -532,9 +547,9 @@ class Run[M]:
         """Call a hook that only observes, on each entry (default: the selected ones, failed
         included only if `observe_failed`). Always fails open: a failure skips, whatever
         `on_error` says, and answers are failures here too."""
+        guard = self._guard
         for entry in self.entries if entries is None else entries:
-            mw = entry.middleware
-            await self._guard(entry, hook, partial(invoke, mw), "skip", None, observing=True)
+            await guard(entry, hook, invoke, (entry.middleware,), None, True)
 
     # Phases that remember what ran, with which context
 
@@ -553,15 +568,17 @@ class Run[M]:
         failed. A stop is kept in `stopped`. Call it again with another context and chain
         (sluice's rename target): `ran` accumulates. `until` is the project's and must not
         raise."""
-        for entry in self.active if entries is None else entries:
-            if self.has_failed(entry):
+        guard, failed, ran = self._guard, self._failed, self.ran
+        for entry in self._active() if entries is None else entries:
+            if entry in failed:
                 continue
-            self.ran.append((entry, context))
-            mw = entry.middleware
-            result = await self._step(entry, hook, partial(invoke, mw, context), valid)
+            ran.append((entry, context))
+            result = await guard(entry, hook, invoke, (entry.middleware, context), valid, False)
             if result is SKIPPED:
                 continue
-            if until is not None and until(cast(R, result)):
+            if result is _INHERITED:
+                result = None  # the base's no-op: `until` is still asked (issue #12)
+            if until is not None and until(result):
                 self.stopped = Stopped(entry, result)
                 return self.stopped
         return None
@@ -586,14 +603,13 @@ class Run[M]:
         keep_none: bool = False,
     ) -> V:
         """Thread `value` through `hook` over `after_pairs()`, each with its own context."""
+        guard = self._guard
         for entry, context in self.after_pairs():
-            mw, current = entry.middleware, value
-            result = await self.call(
-                entry, hook, partial(invoke, mw, context, current), valid=valid
-            )
-            if result is SKIPPED or (keep_none and result is None):
+            args = (entry.middleware, context, value)
+            result = await guard(entry, hook, invoke, args, valid, False)
+            if result is SKIPPED or result is _INHERITED or (keep_none and result is None):
                 continue
-            value = cast(V, result)
+            value = result
         return value
 
     async def observe_ran(
@@ -605,8 +621,6 @@ class Run[M]:
     ) -> None:
         """An observer hook over what ran (default: `ran` in `after_order`, local answer or
         not), each with its own context. Fails open, like `observe`."""
+        guard = self._guard
         for entry, context in self._ordered(self.ran) if pairs is None else pairs:
-            mw = entry.middleware
-            await self._guard(
-                entry, hook, partial(invoke, mw, context), "skip", None, observing=True
-            )
+            await guard(entry, hook, invoke, (entry.middleware, context), None, True)

@@ -19,7 +19,7 @@ CI runs the unit tests on every supported Python version, together with ruff, my
 
 | `tests/unit/test_settings.py` | Declarations, the lookup order and sources, coercion of each type from YAML, the environment and `_FILE`, the checks, secret settings |
 | `tests/unit/test_secret.py` | `Secret` masking (str, repr, f-strings, logging, exceptions) and `read_secret_dir` |
-| `tests/unit/test_pipeline.py` | The guard (timing, timeouts and late results, failures, answers, `valid`), each phase, every `Policy` field (`skip_inherited` with instance hooks and state-based stops), and both consumers' semantics rebuilt on it (mitm-proxy fail-open, sluice onion and fail-closed) |
+| `tests/unit/test_pipeline.py` | The guard (timing, timeouts and late results, failures, answers, `valid`), each phase, every `Policy` field (`skip_inherited` with instance hooks and state-based stops), the cached `active`, and both consumers' semantics rebuilt on it (mitm-proxy fail-open, sluice onion and fail-closed) |
 | `tests/unit/test_metrics.py` | Label sets enforced on every call, declaration checks, the text format, and parity with mitm-proxy's `/metrics` lines |
 
 There are no fixtures beyond pytest's own: tests write YAML and secret files under `tmp_path` and pass `environ` as a plain dict, so the real environment never leaks in.
@@ -36,4 +36,5 @@ There are no fixtures beyond pytest's own: tests write YAML and secret files und
 - **Secrets:** assert the value is absent from `str()`, `repr()`, the exception message and `caplog.text`, not only that the mask is present.
 - **Async tests** use `asyncio.run` directly: there is no pytest-asyncio dependency.
 - **Coverage:** interpose is every consumer's settings engine, so keep it at 100% branch coverage even though the floor is 80%.
+- **No timing assertions.** Performance is measured with `uv run scripts/bench-pipeline.py` (stdlib only; numbers on [Architecture Internals](Architecture-Internals)), never asserted in a test: timings vary by machine and runner.
 - If `/tmp` is short of space, run with `--basetemp` under the repository (a git-ignored path).
