@@ -36,5 +36,5 @@ There are no fixtures beyond pytest's own: tests write YAML and secret files und
 - **Secrets:** assert the value is absent from `str()`, `repr()`, the exception message and `caplog.text`, not only that the mask is present.
 - **Async tests** use `asyncio.run` directly: there is no pytest-asyncio dependency.
 - **Coverage:** interpose is every consumer's settings engine, so keep it at 100% branch coverage even though the floor is 80%.
-- **No timing assertions.** Performance is measured with `uv run scripts/bench-pipeline.py` (stdlib only; numbers on [Architecture Internals](Architecture-Internals)), never asserted in a test: timings vary by machine and runner.
+- **No timing assertions.** Performance is measured with `uv run benchmarks/bench-pipeline.py` (stdlib only; numbers on [Architecture Internals](Architecture-Internals)), never asserted in a test: timings vary by machine and runner.
 - If `/tmp` is short of space, run with `--basetemp` under the repository (a git-ignored path).
