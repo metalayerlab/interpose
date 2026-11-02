@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.5](https://github.com/metalayerlab/interpose/compare/v0.1.4...v0.1.5) (2026-11-02)
+
+
+### ⚡ Performance
+
+* cut the guard's per-call cost ([#20](https://github.com/metalayerlab/interpose/issues/20)) ([a2d9362](https://github.com/metalayerlab/interpose/commit/a2d9362c369e169507b0eaaf6b40bc1e5f09a0b2))
+
 ## [0.1.4](https://github.com/metalayerlab/interpose/compare/v0.1.3...v0.1.4) (2026-11-02)
 
 
