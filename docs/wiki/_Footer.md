@@ -2,7 +2,7 @@
 
 <div align="center">
 
-**interpose** | Shared mechanism for metalayerlab interceptors — the layered settings loader, Secret values, Prometheus text exposition, and a policy-configurable async middleware pipeline.
+**interpose** | Shared mechanism for metalayerlab interceptors — a policy-configurable async middleware pipeline, the layered settings loader, Secret values, and Prometheus text exposition.
 
 [GitHub](https://github.com/metalayerlab/interpose) • [Releases](https://github.com/metalayerlab/interpose/releases) • [Issues](https://github.com/metalayerlab/interpose/issues) • [Changelog](https://github.com/metalayerlab/interpose/blob/main/CHANGELOG.md) • [Contributing](Contributing)
 

@@ -1,6 +1,6 @@
 # AGENTS.md
 
-interpose: Shared mechanism for metalayerlab interceptors — the layered settings loader, Secret values, Prometheus text exposition, and a policy-configurable async middleware pipeline.
+interpose: Shared mechanism for metalayerlab interceptors — a policy-configurable async middleware pipeline, the layered settings loader, Secret values, and Prometheus text exposition.
 Single source of instructions for AI assistants; the tool files point here. Read [`.agents/stack.md`](.agents/stack.md) with it: what this project is, its map, conventions and checks.
 
 ## How to work

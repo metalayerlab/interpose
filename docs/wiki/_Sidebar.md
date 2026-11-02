@@ -35,9 +35,9 @@
 
 ### 🔑 Key Features
 
+- 🧅 One middleware loop; fail open or closed is policy, per project and per middleware
 - 🥞 One lookup order: `_FILE` > environment > YAML > default
 - 🧱 Strict types: no silent `0` for a YAML `0.5`
 - 🧭 Where each value came from, for every setting
 - 🔒 `Secret`: masked in logs, reprs and errors
 - 📈 Prometheus text with labels from declared value sets
-- 🧅 One middleware loop; fail open or closed is policy, per project and per middleware

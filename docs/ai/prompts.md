@@ -125,7 +125,7 @@ For ChatGPT, Claude.ai or another chat with no access to the repository, paste t
 AGENTS.md and the files you're asking about:
 
 ```text
-You're helping on interpose: Shared mechanism for metalayerlab interceptors — the layered settings loader, Secret values, Prometheus text exposition, and a policy-configurable async middleware pipeline.
+You're helping on interpose: Shared mechanism for metalayerlab interceptors — a policy-configurable async middleware pipeline, the layered settings loader, Secret values, and Prometheus text exposition.
 It's Python >= 3.13 with uv, ruff, mypy --strict and pytest.
 I'll paste AGENTS.md (our rules for AI assistants) and the relevant files.
 Follow AGENTS.md exactly. Give complete files or unified diffs, not fragments.

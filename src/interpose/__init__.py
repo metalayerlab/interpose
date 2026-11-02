@@ -1,5 +1,5 @@
-"""Shared mechanism for metalayerlab interceptors — the layered settings loader, Secret values,
-Prometheus text exposition, and a policy-configurable async middleware pipeline.
+"""Shared mechanism for metalayerlab interceptors — a policy-configurable async middleware
+pipeline, the layered settings loader, Secret values, and Prometheus text exposition.
 """
 
 from importlib.metadata import PackageNotFoundError, metadata, version
