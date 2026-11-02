@@ -61,6 +61,12 @@ def test_label_names_starting_with_two_underscores_are_reserved() -> None:
     assert Label("_private").name == "_private"
 
 
+def test_label_values_must_not_be_a_bare_str() -> None:
+    with pytest.raises(TypeError, match="not a str"):
+        Label("kind", "ca")
+    assert Label("kind", ["ca"]).values == frozenset({"ca"})
+
+
 def test_label_values_must_be_str() -> None:
     with pytest.raises(TypeError, match="values must be str"):
         Label("x", ["a", 1])  # type: ignore[list-item]  # the check under test
@@ -207,10 +213,9 @@ def test_counter_counts_and_refuses_to_go_down() -> None:
     c.inc(amount=2.5)
     c.inc(amount=0)
     assert c.values == {(): 3.5}
-    with pytest.raises(ValueError, match="zero or more"):
-        c.inc(amount=-1)
-    with pytest.raises(ValueError, match="zero or more"):
-        c.inc(amount=math.nan)
+    for bad in (-1, math.nan, math.inf):
+        with pytest.raises(ValueError, match="finite and zero or more"):
+            c.inc(amount=bad)
     assert c.values == {(): 3.5}
 
 
@@ -351,6 +356,22 @@ def test_registry_rejects_a_duplicate_name() -> None:
     reg = Registry([Counter("x", "help")])
     with pytest.raises(ValueError, match="registered twice"):
         reg.register(Gauge("x", "help"))
+
+
+@pytest.mark.parametrize("suffix", ["_bucket", "_sum", "_count"])
+def test_registry_rejects_a_clash_with_a_histograms_samples(suffix: str) -> None:
+    reg = Registry([Histogram("foo", "help", (1,))])
+    with pytest.raises(ValueError, match="clashes with the samples of 'foo'"):
+        reg.register(Counter(f"foo{suffix}", "help"))
+    other = Registry([Counter(f"foo{suffix}", "help")])
+    with pytest.raises(ValueError, match=f"clashes with the samples of 'foo{suffix}'"):
+        other.register(Histogram("foo", "help", (1,)))
+
+
+def test_metrics_with_distinct_samples_coexist() -> None:
+    reg = Registry([Histogram("foo", "help", (1,)), Counter("foo_total", "help")])
+    assert len(reg) == 2
+    assert Counter("c", "help").series_names == frozenset({"c"})
 
 
 def test_registry_takes_only_metrics() -> None:

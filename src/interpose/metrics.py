@@ -73,6 +73,9 @@ class Label:
             raise ValueError(f"label name {name!r} must match [a-zA-Z_][a-zA-Z0-9_]*")
         if name.startswith("__"):
             raise ValueError(f"label name {name!r}: names starting with __ are reserved")
+        if isinstance(values, str):
+            # A bare str is an iterable of characters: Label("kind", "ca") would allow "c", "a".
+            raise TypeError(f"label {name!r}: values must be an iterable of str, not a str")
         self.name = name
         self._values: set[str] = set()
         self.declare(*values)
@@ -115,6 +118,11 @@ class Metric:
         self.values: dict[LabelValues, float] = {}
 
     @property
+    def series_names(self) -> frozenset[str]:
+        """Every sample name this metric writes."""
+        return frozenset({self.name})
+
+    @property
     def label_names(self) -> tuple[str, ...]:
         return tuple(label.name for label in self.labels)
 
@@ -154,8 +162,9 @@ class Counter(Metric):
         super().__init__(name, help, "counter", labels)
 
     def inc(self, *values: str, amount: float = 1.0) -> None:
-        if not amount >= 0:  # also refuses NaN
-            raise ValueError(f"counter {self.name!r}: amount must be zero or more")
+        # NaN and +Inf would poison the series until the process restarts.
+        if not (math.isfinite(amount) and amount >= 0):
+            raise ValueError(f"counter {self.name!r}: amount must be finite and zero or more")
         key = self._check(values)
         self.values[key] = self.values.get(key, 0.0) + amount
 
@@ -204,6 +213,10 @@ class Histogram(Metric):
         # Per label set: a count per bucket (the last is +Inf; not cumulative), and the sum.
         self.series: dict[LabelValues, tuple[list[int], list[float]]] = {}
 
+    @property
+    def series_names(self) -> frozenset[str]:
+        return frozenset({self.name, *(f"{self.name}{s}" for s in ("_bucket", "_sum", "_count"))})
+
     def observe(self, value: float, *values: str) -> None:
         if math.isnan(value):
             raise ValueError(f"histogram {self.name!r}: can't observe NaN")
@@ -247,6 +260,13 @@ class Registry:
             raise TypeError("only Metric objects can be registered")
         if metric.name in self._metrics:
             raise ValueError(f"metric {metric.name!r} is registered twice")
+        # A histogram writes foo_bucket, foo_sum and foo_count: a counter called foo_count next
+        # to it would make two families share a sample name, and the scrape would fail.
+        for other in self._metrics.values():
+            if other.series_names & metric.series_names:
+                raise ValueError(
+                    f"metric {metric.name!r} clashes with the samples of {other.name!r}"
+                )
         self._metrics[metric.name] = metric
         return metric
 

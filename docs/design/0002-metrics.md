@@ -133,9 +133,12 @@ live request:
   called `le`;
 - histogram buckets are finite, distinct and at least one (they are sorted, as mitm-proxy did; `+Inf` is
   always added);
-- `Registry` rejects two metrics with the same name.
+- `Registry` rejects two metrics with the same name, or whose sample names clash (a histogram `foo`
+  writes `foo_bucket`, `foo_sum` and `foo_count`, so a counter `foo_count` beside it is refused);
+- a label's values are an iterable of `str`, never a bare `str` (which would declare its characters).
 
-At use: a counter's `amount` must be zero or more (counters only go up), and a histogram refuses `NaN`
+At use: a counter's `amount` must be finite and zero or more (counters only go up, and `+Inf` would pin
+the series), and a histogram refuses `NaN`
 (it would land in no bucket and poison `_sum`).
 
 ### What stays in the projects

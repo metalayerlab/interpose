@@ -62,10 +62,10 @@ Prometheus text exposition (format 0.0.4). Every label takes its values from a d
 **`Label(name, values=())`**: a label name and the only values it may take.
 
 - `name`: matches `[a-zA-Z_][a-zA-Z0-9_]*`, not starting with `__`.
-- `values`: a read-only `frozenset[str]`. `value in label` tests one.
+- `values`: an iterable of `str` (a list, not a bare string: `Label("kind", "ca")` is a `TypeError`); read back as a `frozenset[str]`. `value in label` tests one.
 - **`declare(*values)`**: allow more values, from configuration (the middleware names a reload brings), never from measured data. Values are never removed. One `Label` can be shared by several metrics, so one `declare` covers all of them.
 
-**`Counter(name, help, labels=())`**: `inc(*values, amount=1.0)`. `amount` must be zero or more.
+**`Counter(name, help, labels=())`**: `inc(*values, amount=1.0)`. `amount` must be finite and zero or more.
 
 **`Gauge(name, help, labels=(), read=None)`**: `set(value, *values)`, `add(amount, *values)`. With `read` (a callable returning `{label values: number}`), the samples come from it when the gauge renders.
 
@@ -76,7 +76,7 @@ Prometheus text exposition (format 0.0.4). Every label takes its values from a d
 
 **`Registry(metrics=())`**: the metrics one endpoint exports.
 
-- **`register(metric) -> metric`**: adds it and returns it. A second metric with the same name raises `ValueError`.
+- **`register(metric) -> metric`**: adds it and returns it. A second metric with the same name, or one whose samples clash with another's (a counter `foo_count` next to a histogram `foo`), raises `ValueError`.
 - Iterates in registration order; `len()` counts the metrics.
 - **`render() -> str`**: every metric's `# HELP`, `# TYPE` and samples (sorted by label values), joined by newlines and ending in one; `""` when empty.
 
