@@ -1,7 +1,7 @@
 # Release Process
 
-<!-- Template-owned page: it changes in project-template and arrives with `copier update`.
-     AI assistants: AGENTS.md already holds the rules you need (PR titles, never edit the version or
+<!-- Template-owned page: it changes in template-python and arrives with `copier update`.
+     AI assistants: AGENTS.md and .agents/stack.md already hold the rules you need (PR titles, never edit the version or
      CHANGELOG). Read further only to explain releases to someone, or to change release configuration. -->
 
 Releases are automated by [release-please](https://github.com/googleapis/release-please). Nobody edits a version number or the changelog by hand, and nobody pushes tags.
@@ -38,4 +38,4 @@ Releases are automated by [release-please](https://github.com/googleapis/release
 - **Force a version:** a commit with `Release-As: 1.0.0` in its body (an empty `chore:` commit is fine) makes the next Release PR use that version.
 - **Hotfix:** a `fix:` PR to `main` and a release as usual. There are no long-lived release branches.
 
-Setup note for maintainers: Release PRs opened with the default `GITHUB_TOKEN` don't trigger CI. The organisation's release GitHub App (`RELEASE_APP_CLIENT_ID` variable, `RELEASE_APP_PRIVATE_KEY` secret) fixes that; see project-template's Release-Process page.
+Setup note for maintainers: Release PRs opened with the default `GITHUB_TOKEN` don't trigger CI. The organisation's release GitHub App (`RELEASE_APP_CLIENT_ID` variable, `RELEASE_APP_PRIVATE_KEY` secret) fixes that; see template-python's README.

@@ -3,6 +3,8 @@
   "attribution": {"commit": "", "pr": "", "sessionUrl": false},
   "permissions": {
     "allow": [
+      "Bash(gh:*)",
+      "Bash(sh scripts/checks.sh)",
       "Bash(uv sync:*)",
       "Bash(uv run ruff:*)",
       "Bash(uv run mypy:*)",
@@ -10,6 +12,7 @@
       "Bash(uv run scripts/gen-wiki.py:*)",
       "Bash(python3 scripts/check-wiki.py:*)",
       "Bash(scripts/check-docs-secrets.sh:*)",
+      "Bash(scripts/check-markdown.sh)",
       "Bash(git status:*)",
       "Bash(git diff:*)",
       "Bash(git log:*)"
@@ -17,7 +20,7 @@
     "deny": [
       "Edit(CHANGELOG.md)",
       "Edit(.release-please-manifest.json)",
-      "Edit(.copier-answers.yml)",
+      "Edit(.copier-answers.*.yml)",
       "Bash(git push * main)",
       "Bash(git push * main *)",
       "Bash(git push *:main)",
@@ -32,6 +35,9 @@
       "Bash(git push *--follow-tags*)",
       "Bash(git tag:*)",
       "Bash(gh release:*)",
+      "Bash(gh api *releases*)",
+      "Bash(gh repo delete:*)",
+      "Bash(gh repo archive:*)",
       "Bash(gh pr create *-R *)",
       "Bash(gh pr create *--repo*)",
       "Edit(./.venv/**)",

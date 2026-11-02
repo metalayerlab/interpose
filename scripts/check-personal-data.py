@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail if any tracked file contains personal data.
+"""Fail if any tracked file contains personal data. Template-owned: template-base.
 
 Checks every file tracked by git (or the paths given) for:
   - public IPv4 addresses. RFC 5737 documentation ranges, private and loopback
@@ -11,7 +11,7 @@ Version numbers after a product token ("Chrome/130.0.0.0") are not treated as
 addresses. A line containing "personal-data: ok" skips the IP check, for
 deliberate test values; the denylist still applies to it.
 
-Stdlib only, so CI can run it before installing anything. Template-owned.
+Stdlib only, so CI can run it before installing anything.
 """
 
 from __future__ import annotations

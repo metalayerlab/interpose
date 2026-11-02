@@ -50,7 +50,7 @@ would defend it.
 
 ## Docs and release
 
-- [ ] The wiki pages in AGENTS.md's "Docs map" are updated, and they're accurate rather than merely present.
+- [ ] The wiki pages in .agents/stack.md's "Docs map" are updated, and they're accurate rather than merely present.
 - [ ] Generated wiki sections were regenerated, not hand-edited.
 - [ ] The PR title is a correct Conventional Commit. `feat` vs `fix`, and `!` for breaking, decide the
       version bump.
@@ -60,7 +60,7 @@ would defend it.
 
 - [ ] Changes to AGENTS.md are terse rules; the reasons went to the wiki. CI enforces the size budget, so a
       change that only fits by squeezing out other rules needs a second look.
-- [ ] New large or generated paths (fixtures, snapshots, build output) are in AGENTS.md "Don't read" and
+- [ ] New large or generated paths (fixtures, snapshots, build output) are in .agents/stack.md "Don't read" and
       denied in `.claude/settings.json`.
 - [ ] New design records are listed in `docs/design/README.md`.
 
