@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import errno
+import time
 from collections.abc import Coroutine
 from typing import Any
 
@@ -453,6 +455,123 @@ def test_cancellation_is_never_caught() -> None:
     with pytest.raises(asyncio.CancelledError):
         run(r.call(r.entries[0], "hook", lambda: mw.hook()))
     assert not r.has_failed(r.entries[0])
+
+
+def _limited(on_error: str = "skip", **kw: Any) -> Policy:
+    return Policy(
+        on_error=on_error,  # type: ignore[arg-type]  # a literal, from the caller
+        after_order="chain",
+        after_local=False,
+        observe_failed=False,
+        timeout=0.01,
+        **kw,
+    )
+
+
+async def _guarded_then_awaits(r: Run[Any], entry: Entry[Any], invoke: Any) -> Any:
+    """The guarded call, then proof nothing is left pending for the caller's next await."""
+    result = await r.call(entry, "hook", invoke)
+    task = asyncio.current_task()
+    assert task is not None and task.cancelling() == 0
+    await asyncio.sleep(0)
+    return result
+
+
+def test_a_hook_that_overruns_its_limit_in_sync_code_is_a_late_timeout() -> None:
+    # Design 0005: the deadline passed while the hook blocked, so the cancellation never
+    # reached it and asyncio.timeout exits cleanly; the late result is still refused.
+    async def blocks() -> str:
+        time.sleep(0.03)  # the misbehaviour under test: blocking the event loop
+        return "late"
+
+    got, report = failures()
+    r: Run[Any] = Pipeline([Entry(object(), "blocker")], _limited()).start(on_failure=report)
+    assert run(_guarded_then_awaits(r, r.entries[0], blocks)) is SKIPPED
+    f = got[0]
+    assert (f.timed_out, f.late, f.timeout) == (True, "overran", 0.01)
+    assert isinstance(f.error, TimeoutError) and "late" not in str(f.error)
+    assert r.has_failed(r.entries[0])
+
+
+def test_a_hook_that_swallows_its_cancellation_is_a_late_timeout() -> None:
+    async def swallows() -> str:
+        # The misbehaviour under test: the cancellation is caught and dropped.
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.sleep(5)
+        return "late"
+
+    r: Run[Any] = Pipeline([Entry(object(), "swallower")], _limited("fail")).start()
+    with pytest.raises(HookFailed, match="'swallower' timed out in hook") as e:
+        run(_guarded_then_awaits(r, r.entries[0], swallows))
+    f = e.value.failure
+    assert (f.timed_out, f.late, f.action) == (True, "swallowed", "fail")
+    assert isinstance(e.value.__cause__, TimeoutError)
+
+
+def test_a_late_timeout_is_never_an_answer() -> None:
+    async def blocks() -> str:
+        time.sleep(0.03)  # the misbehaviour under test: blocking the event loop
+        return "late"
+
+    got, report = failures()
+    policy = _limited(answers=(TimeoutError,))
+    r: Run[Any] = Pipeline([Entry(object(), "blocker")], policy).start(on_failure=report)
+    assert run(r.call(r.entries[0], "hook", blocks)) is SKIPPED
+    assert got[0].late == "overran"
+
+
+def test_a_hook_that_blocks_then_awaits_is_an_ordinary_timeout() -> None:
+    # The cancellation arrives at the first await that lets the loop fire the deadline:
+    # asyncio.timeout raises, as for any timeout.
+    async def blocks_then_awaits() -> str:
+        time.sleep(0.03)  # the misbehaviour under test: blocking the event loop
+        await asyncio.sleep(0.01)
+        return "late"
+
+    got, report = failures()
+    r: Run[Any] = Pipeline([Entry(object(), "blocker")], _limited()).start(on_failure=report)
+    assert run(_guarded_then_awaits(r, r.entries[0], blocks_then_awaits)) is SKIPPED
+    assert (got[0].timed_out, got[0].late) == (True, None)
+
+
+def test_a_normal_timeout_has_no_late_reason() -> None:
+    got, report = failures()
+    mw = Mw("slow", sleep=5)
+    r = Pipeline([mw], _limited()).start(on_failure=report)
+    assert run(_guarded_then_awaits(r, r.entries[0], lambda: mw.hook())) is SKIPPED
+    assert (got[0].timed_out, got[0].late) == (True, None)
+
+
+def test_a_hook_in_time_under_a_limit_keeps_its_result() -> None:
+    got, report = failures()
+    mw = Mw("quick", result="ok")
+    r = Pipeline([mw], _limited()).start(on_failure=report)
+    assert run(_guarded_then_awaits(r, r.entries[0], lambda: mw.hook())) == "ok"
+    assert got == []
+
+
+def test_an_outer_cancellation_passes_through_a_limited_hook() -> None:
+    got, report = failures()
+    mw = Mw("slow", sleep=5)
+    policy = Policy(
+        on_error="skip",
+        after_order="chain",
+        after_local=False,
+        observe_failed=False,
+        timeout=60,
+    )
+    r = Pipeline([mw], policy).start(on_failure=report)
+
+    async def main() -> None:
+        task = asyncio.ensure_future(r.call(r.entries[0], "hook", lambda: mw.hook()))
+        await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert task.cancelled()
+
+    run(main())
+    assert got == [] and not r.has_failed(r.entries[0])
 
 
 def test_a_sync_hook_fails_when_called() -> None:

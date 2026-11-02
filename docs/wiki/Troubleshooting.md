@@ -47,3 +47,7 @@ The code called `str()` on the `Secret`. Call `reveal()` at the point of use.
 ### "cannot read secret 'token' in /run/secrets: Permission denied"
 
 `read_secret_dir` found a file it can't read. Every regular file in the directory must be readable; dot-entries are skipped.
+
+### A hook "timed out" although it returned a result
+
+`Failure.late` says why: `"overran"` means the deadline passed while the hook ran synchronous code (a blocking call, CPU work), so the timeout couldn't cancel it; `"swallowed"` means the hook was cancelled and caught `CancelledError` (or `BaseException`) and returned anyway. Either way the result came after the limit and was discarded. Move blocking work off the event loop (`asyncio.to_thread`, and note that the thread keeps running after a timeout), and let `CancelledError` propagate: do cleanup in `try/finally` or `async with`.
