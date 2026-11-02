@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/metalayerlab/interpose/compare/v0.2.1...v0.2.2) (2026-11-02)
+
+
+### ⚡ Performance
+
+* resolve skip_inherited overrides once per entry, not per call ([#28](https://github.com/metalayerlab/interpose/issues/28)) ([57a69fc](https://github.com/metalayerlab/interpose/commit/57a69fc7807daf1d530397e43bbd006919973f7e)), closes [#25](https://github.com/metalayerlab/interpose/issues/25)
+
 ## [0.2.1](https://github.com/metalayerlab/interpose/compare/v0.2.0...v0.2.1) (2026-11-02)
 
 
