@@ -44,8 +44,10 @@ class Label:
     """A label name and the only values it may take."""
 
     def __init__(self, name: str, values: Iterable[str] = ()) -> None: ...
+
     name: str
     values: frozenset[str]  # property, read-only
+
     def declare(self, *values: str) -> None: ...  # add values, e.g. after a config reload
 
 
