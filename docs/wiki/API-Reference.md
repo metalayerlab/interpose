@@ -131,11 +131,12 @@ The middleware loop and the guard around every hook. interpose defines no hooks 
 | `observe_ran(hook, invoke, *, pairs)` | `invoke(mw, context)`; always fails open | `ran` in `after_order` | `None` |
 | `scoped(entry)` | | | a `ScopedState` |
 
-- **The guard**, around every call: skips a failed entry (observers: unless `observe_failed`) or an inherited hook; times the call into `timings[name]`; bounds it with the entry's or the policy's timeout; re-raises `answers` (not in observers); anything else it raises, or a result `valid` refuses (or a `valid` that raises), is a failure: the entry leaves `active`, `on_failure` is called, and under `"fail"` `HookFailed` is raised (under `"skip"`, `SKIPPED` is returned). `CancelledError` is never caught.
+- **The guard**, around every call: skips a failed entry (observers: unless `observe_failed`) or an inherited hook; times the call into `timings[name]`; bounds it with the entry's or the policy's timeout; re-raises `answers` (not in observers); anything else it raises, or a result `valid` refuses (or a `valid` that raises), is a failure: the entry leaves `active`, `on_failure` is called, and under `"fail"` `HookFailed` is raised (under `"skip"`, `SKIPPED` is returned). `CancelledError` is never caught. A hook that returns after its limit (it ran past the deadline in synchronous code, `late="overran"`, or caught its cancellation, `late="swallowed"`) has its result discarded: it is a timeout failure (`timed_out=True`, a `TimeoutError`), handled by `on_error`.
+- **Hooks and timeouts:** a timeout cancels the hook at its current `await`. Hooks must be cancel-safe (cleanup in `try/finally` or `async with`) and must never swallow `CancelledError` or `BaseException`. Blocking or CPU-bound work goes off the event loop: a timeout can't interrupt synchronous code. A thread started with `run_in_executor` or `asyncio.to_thread` keeps running after its `await` is cancelled.
 - `keep_none=True` makes a `None` result keep the value (a chunk hook that passes a chunk on).
 - `until` is the project's predicate and must not raise. Under `"fail"`, `start()` raises `HookFailed` when a `select` fails.
 
-**`Failure(middleware, hook, error, timed_out, action, timeout)`**: what failed, with what, and whether the guard's timeout did it; `action` is `"skip"` or `"fail"`; `timeout` is the limit that applied (seconds, or `None`). Holds no unit data.
+**`Failure(middleware, hook, error, timed_out, action, timeout, late=None)`**: what failed, with what, and whether the guard's timeout did it; `action` is `"skip"` or `"fail"`; `timeout` is the limit that applied (seconds, or `None`); `late` (**`Late`**) is `"overran"` or `"swallowed"` for a result that came back after the limit, else `None`. Holds no unit data.
 
 **`HookFailed`**: raised under `"fail"`. `failure` is the `Failure`; `__cause__` is what the hook raised (a `TimeoutError` for a timeout). The message names the middleware and the hook, never a value.
 

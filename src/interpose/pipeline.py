@@ -19,6 +19,18 @@ then, by the middleware's `on_error` (else the project's), either skips that mid
 rest of the unit or raises `HookFailed` for the project to turn into its own deny (a 502, an
 errno). Nothing is retried, nothing is killed, nothing is scheduled as a background task: every
 hook is awaited in turn, which is what carries backpressure. Nothing here logs or does I/O.
+
+Hooks and timeouts (design 0005). A timeout *cancels* the hook at its current `await`, so:
+
+- hooks must be cancel-safe: cleanup goes in `try/finally` or `async with`;
+- hooks must never swallow `CancelledError` (or catch `BaseException` and carry on);
+- blocking or CPU-bound work goes off the event loop: a timeout can't interrupt synchronous code;
+- a thread started with `run_in_executor` or `asyncio.to_thread` keeps running after its
+  `await` is cancelled; the timeout only stops the waiting.
+
+A hook that returns after its limit anyway, because it ran past the deadline in synchronous code
+(the cancellation never arrived) or caught the cancellation and returned, has its result
+discarded: it is a timeout failure (`Failure.late` says which), handled by `on_error`.
 """
 
 from __future__ import annotations
@@ -39,6 +51,7 @@ __all__ = [
     "Failure",
     "HookFailed",
     "InvalidResult",
+    "Late",
     "OnError",
     "Order",
     "Pipeline",
@@ -52,6 +65,7 @@ __all__ = [
 
 OnError = Literal["skip", "fail"]
 Order = Literal["chain", "reverse"]
+Late = Literal["overran", "swallowed"]
 
 _ON_ERROR = ("skip", "fail")
 _ORDER = ("chain", "reverse")
@@ -184,6 +198,10 @@ class Failure:
     timed_out: bool
     action: OnError  # what the pipeline did about it
     timeout: float | None = None  # the limit that applied to the call, in seconds
+    # A result that came back after the limit (design 0005): "overran" if the deadline passed
+    # while the hook ran synchronous code, so the cancellation never reached it; "swallowed" if
+    # it was cancelled and caught the cancellation. None for every other failure.
+    late: Late | None = None
 
 
 class HookFailed(Exception):
@@ -246,6 +264,25 @@ def require_async(middleware: object, hooks: Iterable[str], *, name: str | None 
         method = getattr(middleware, hook, None)
         if method is not None and not inspect.iscoroutinefunction(method):
             raise TypeError(f"middleware {label!r}: {hook} must be an async function")
+
+
+def _late(limit: asyncio.Timeout) -> Late | None:
+    """Why a hook that returned normally came back after its limit, or None if it was in time.
+
+    Public asyncio state only. `expired()` is true once the guard's deadline fired, which
+    cancels the task; a task is always suspended when the loop fires it, so the cancellation
+    was thrown into the hook, and a normal return means the hook caught it. If the deadline
+    never fired yet the loop clock is past it, the hook ran it out in synchronous code and
+    returned before the loop could deliver the cancellation. In both cases `asyncio.timeout`
+    has already withdrawn its cancel request (`uncancel()`), or never made one, so nothing
+    is left pending for the caller's next `await`.
+    """
+    if limit.expired():
+        return "swallowed"
+    # `_late` is only asked when a limit applied, so the deadline is set.
+    if asyncio.get_running_loop().time() >= cast(float, limit.when()):
+        return "overran"
+    return None
 
 
 class Pipeline[M]:
@@ -347,10 +384,11 @@ class Run[M]:
         timed_out: bool,
         action: OnError,
         timeout: float | None = None,
+        late: Late | None = None,
     ) -> None:
         """Take entry out of the run, report it, and raise if the action is "fail"."""
         self._failed.add(entry)
-        failure = Failure(entry.name, hook, error, timed_out, action, timeout)
+        failure = Failure(entry.name, hook, error, timed_out, action, timeout, late)
         if self.on_failure is not None:
             self.on_failure(failure)
         if action == "fail":
@@ -383,20 +421,28 @@ class Run[M]:
         if timeout == NO_LIMIT:
             timeout = None
         limit = asyncio.timeout(timeout)
+        late: Late | None = None
         start = time.perf_counter()
         try:
             async with limit:
                 result = await invoke()
+            if timeout is not None:
+                late = _late(limit)
+                if late is not None:
+                    # The result is discarded: a caller that set a limit never gets a late
+                    # answer, whether or not the hook cooperated with the cancellation.
+                    raise TimeoutError(f"{hook} returned after its {timeout}s limit ({late})")
             # Inside the try: a `valid` that raises on an odd result is that result's failure,
             # handled by on_error like any other, not an exception escaping the pipeline.
             if valid is not None and not valid(result):
                 raise InvalidResult(f"{hook} returned {type(result).__name__}")
         except Exception as e:
-            if not observing and isinstance(e, self.policy.answers):
+            if late is None and not observing and isinstance(e, self.policy.answers):
                 raise
             # A TimeoutError the hook raised itself (its own network call) is an ordinary
             # failure; only the guard's own limit counts as a timeout.
-            self._fail(entry, hook, e, limit.expired(), action, timeout)
+            timed_out = late is not None or limit.expired()
+            self._fail(entry, hook, e, timed_out, action, timeout, late)
             return SKIPPED
         finally:
             self.timings[entry.name] = (
