@@ -677,6 +677,55 @@ def test_skip_inherited_calls_a_hook_set_on_the_instance() -> None:
     assert "gated" in r.timings and "plain" not in r.timings
 
 
+def _skip_inherited_policy() -> Policy:
+    return Policy(
+        on_error="fail",
+        after_order="chain",
+        after_local=False,
+        observe_failed=False,
+        skip_inherited=Base,
+    )
+
+
+def test_skip_inherited_resolves_overrides_when_the_pipeline_is_built() -> None:
+    # Issue #25: overrides are resolved once, when the Pipeline is built, not on every call. A
+    # hook set on the instance before that is honoured in every run; one set after isn't seen.
+    class Inherits(Base):
+        pass
+
+    early, late = Inherits(), Inherits()
+
+    async def gate(arg: Any = None) -> str:
+        return "gate"
+
+    early.hook = gate  # type: ignore[method-assign]  # the instance attribute is what's tested
+    p = Pipeline([Entry(early, "early"), Entry(late, "late")], _skip_inherited_policy())
+    late.hook = gate  # type: ignore[method-assign]  # after the build: documented as not seen
+    for _ in range(2):
+        r = p.start()
+        a, b = r.entries
+        assert run(r.call(a, "hook", lambda: early.hook())) == "gate"
+        assert run(r.call(b, "hook", lambda: late.hook())) is SKIPPED
+        assert "early" in r.timings and "late" not in r.timings
+
+
+def test_skip_inherited_resolves_an_entry_added_to_a_run_on_its_first_call() -> None:
+    class Overrides(Base):
+        async def hook(self) -> Any:
+            return "mine"
+
+    class Inherits(Base):
+        pass
+
+    over, inh = Overrides(), Inherits()
+    r = Pipeline[Base]([], _skip_inherited_policy()).start()
+    r.entries[:] = [Entry[Base](over, "over"), Entry[Base](inh, "inh")]
+    a, b = r.entries
+    assert run(r.call(a, "hook", over.hook)) == "mine"
+    assert run(r.call(b, "hook", inh.hook)) is SKIPPED
+    assert run(r.call(b, "other", lambda: asyncio.sleep(0, "called"))) == "called"
+
+
 def test_skip_inherited_works_for_middleware_without_an_instance_dict() -> None:
     class SlotBase:
         __slots__ = ()
