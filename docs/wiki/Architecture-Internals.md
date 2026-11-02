@@ -4,7 +4,7 @@ How interpose works inside: for contributors, reviewers and AI assistants. User-
 
 ## Overview
 
-Three modules and no global state. A consumer's `config.py` builds one `Settings` at import, which only validates the declarations and binds the prefix. All I/O happens when `resolve()` is called.
+Four modules and no global state. A consumer's `config.py` builds one `Settings` at import, which only validates the declarations and binds the prefix. All I/O happens when `resolve()` is called.
 
 ```mermaid
 flowchart LR
@@ -24,6 +24,7 @@ flowchart LR
 | `interpose/settings.py` | `Setting`, `Settings`, `Resolved`, `ConfigError`, coercion, the single-value checks |
 | `interpose/secret.py` | `Secret`, `MASK`, `read_secret_dir` |
 | `interpose/metrics.py` | `Label`, `Counter`, `Gauge`, `Histogram`, `Registry`, `CONTENT_TYPE`: Prometheus text exposition |
+| `interpose/pipeline.py` | `Policy`, `Entry`, `Pipeline`, `Run`, `Failure`, `HookFailed`: the middleware loop and the guard around every hook |
 
 ## Data flow
 
@@ -56,6 +57,17 @@ A project builds its metrics at startup, each with `Label` objects that hold the
 
 That is byte-for-byte mitm-proxy's output before it moved here (0002), which keeps its dashboards working.
 
+### Pipeline
+
+A project builds a `Pipeline` once (its chain and its `Policy`) and calls `start()` per unit. The `Run` holds what applies, what has failed, what ran (with its context) and whether a before phase stopped. Every hook call goes through one guard:
+
+1. Skip if the entry has failed (observers: unless `observe_failed`) or `skip_inherited` says the hook isn't overridden.
+2. Time it into `timings[name]` with `time.perf_counter`, failed calls included.
+3. Bound it with `asyncio.timeout` (the entry's timeout, else the policy's). Only the guard's own limit is a timeout (`expired()`); a `TimeoutError` the hook raises is an ordinary failure.
+4. Catch `Exception`. `answers` are re-raised (not by observers). Anything else, or a result `valid` refuses, is a failure: the entry leaves `active`, `on_failure` gets a `Failure`, and `"fail"` raises `HookFailed` from the hook's exception; `"skip"` returns `SKIPPED`.
+
+Every hook is awaited in turn on the caller's task. Nothing is scheduled with `create_task`, which is what carries backpressure from a slow hook back to the reader. Nothing is logged: `on_failure` is where the project logs with its unit ID. `after_pairs()` applies the after-phase policy: what ran, minus what failed, in `after_order`, and nothing after a stop unless `after_local`.
+
 ## Design decisions
 
 Why things are the way they are is recorded in [docs/design/](https://github.com/metalayerlab/interpose/tree/main/docs/design). Rejected ideas and the reasons are in [TODO.md](https://github.com/metalayerlab/interpose/blob/main/TODO.md) under "Decided against".
@@ -66,3 +78,4 @@ Why things are the way they are is recorded in [docs/design/](https://github.com
 - **`Secret` isn't a `str`** (0001): it can't reach a log or an f-string as its value by accident.
 - **Mechanism only** (0001): rules that span settings, and policies, stay in each project.
 - **Labels from declared sets** ([0002](https://github.com/metalayerlab/interpose/blob/main/docs/design/0002-metrics.md)): an undeclared label value is a `ValueError`, so "no unbounded labels" is enforced, not a comment. Transport (HTTP, a virtual file) stays in the project.
+- **Policies are required, not defaulted** ([0003](https://github.com/metalayerlab/interpose/blob/main/docs/design/0003-pipeline-core.md)): fail open or closed, after-hook order, after hooks on local answers and observers on failed middleware are each project's, so none inherits another's by omission. Per-middleware `on_error` and timeout cover the middleware whose role differs from the project default. 0003 also reconciles both consumers' "Decided against" lists.

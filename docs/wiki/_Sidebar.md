@@ -40,3 +40,4 @@
 - 🧭 Where each value came from, for every setting
 - 🔒 `Secret`: masked in logs, reprs and errors
 - 📈 Prometheus text with labels from declared value sets
+- 🧅 One middleware loop; fail open or closed is policy, per project and per middleware

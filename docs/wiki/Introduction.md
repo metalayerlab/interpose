@@ -10,7 +10,7 @@ It holds **mechanism, not policy**. A project keeps its own settings, its `Confi
 |---|---|
 | v0.1 | `interpose.settings` (the layered settings engine) and `interpose.secret` (`Secret`, `read_secret_dir`) |
 | v0.1.1 | `interpose.metrics`: Prometheus text exposition with declared label sets (design 0002) |
-| later | the middleware pipeline core (design 0003) |
+| v0.1.2 | `interpose.pipeline`: the middleware loop and per-project, per-middleware failure policy (design 0003) |
 
 ## How it works
 

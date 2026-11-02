@@ -2,7 +2,7 @@
 
 ## Public API
 
-Import from the submodules: `interpose.settings`, `interpose.secret` and `interpose.metrics`. The package itself exports only `__version__` and `__description__`. Anything starting with `_` is internal.
+Import from the submodules: `interpose.settings`, `interpose.secret`, `interpose.metrics` and `interpose.pipeline`. The package itself exports only `__version__` and `__description__`. Anything starting with `_` is internal.
 
 ### `interpose.settings`
 
@@ -95,6 +95,72 @@ body = REGISTRY.render()  # serve with CONTENT_TYPE, or as a file
 ```
 
 interpose doesn't serve the text: an HTTP endpoint or a virtual file is the project's.
+
+### `interpose.pipeline`
+
+The middleware loop and the guard around every hook. interpose defines no hooks and no unit of work: the project keeps its own `Middleware` class and unit (a flow, a call), and passes `invoke` callables that call its hooks.
+
+**`Policy(on_error, after_order, after_local, observe_failed, *, timeout=None, answers=(), skip_inherited=None)`**: the project's answers, a frozen dataclass. The first four have no default.
+
+- `on_error`: `"skip"` (a failing middleware is out for the rest of the unit, which carries on) or `"fail"` (`HookFailed` is raised), unless the middleware says.
+- `after_order`: `"chain"` (as registered) or `"reverse"` (the onion).
+- `after_local`: whether after hooks run when a before hook stopped the unit (answered locally).
+- `observe_failed`: whether observer hooks still reach a middleware that has failed.
+- `timeout`: seconds per hook call, unless the middleware says; `None` is no limit.
+- `answers`: exception types a hook raises as its answer (a deny), re-raised unchanged whatever `on_error` says.
+- `skip_inherited`: the project's base class; a hook a middleware doesn't override isn't called (no timing).
+- Raises `ValueError` for a value outside these.
+
+**`Entry(middleware, name, on_error=None, timeout=None)`**: one middleware in a chain with its own policy (`None`: the project's). Compared by identity. **`Entry.of(middleware, name=None)`** reads the middleware's `name`, `on_error` and `timeout` attributes; `name=` wins. **`name_of(middleware)`**: its `name` attribute if a non-empty `str`, else its class name.
+
+**`Pipeline(middleware, policy)`**: a frozen chain (middleware or `Entry`s) and its policy. `entries`, `names`, `policy`.
+
+- **`start(*, select=None, select_hook="select", on_failure=None, timings=None, state=None) -> Run`**: one unit's run. `select(middleware) -> bool` picks what applies, once, now; one that raises fails like a hook named `select_hook`. `on_failure(Failure)` is called for every failure (log and count it there). `timings` and `state`, if given, are filled in place.
+
+**`Run`**: one unit's pass. `entries` (selected), `active` (minus failed), `timings` (seconds per middleware name), `state`, `ran` (`(entry, context)` pairs), `stopped`, `policy`, `has_failed(entry)`.
+
+| Method | Calls | Over (default) | Returns |
+|---|---|---|---|
+| `call(entry, hook, invoke, *, valid=None)` | `invoke()` | one entry | the result, or `SKIPPED` |
+| `each(hook, invoke, *, entries, until, valid)` | `invoke(mw)` until `until(result)` | `active` | `Stopped(entry, result)` or `None` |
+| `fold(hook, value, invoke, *, entries, valid, keep_none=False)` | `invoke(mw, value)`; the result replaces `value` | `active` | the value |
+| `observe(hook, invoke, *, entries)` | `invoke(mw)`; always fails open | `entries` | `None` |
+| `before(hook, context, invoke, *, entries, until, valid)` | `invoke(mw, context)`, recording `(entry, context)` in `ran` first; a stop is kept in `stopped` | `active` | `Stopped` or `None` |
+| `after_pairs()` | | `ran` in `after_order`, minus failed; `[]` after a stop unless `after_local` | the pairs |
+| `after(hook, value, invoke, *, valid, keep_none=False)` | `invoke(mw, context, value)` | `after_pairs()` | the value |
+| `observe_ran(hook, invoke, *, pairs)` | `invoke(mw, context)`; always fails open | `ran` in `after_order` | `None` |
+| `scoped(entry)` | | | a `ScopedState` |
+
+- **The guard**, around every call: skips a failed entry (observers: unless `observe_failed`) or an inherited hook; times the call into `timings[name]`; bounds it with the entry's or the policy's timeout; re-raises `answers` (not in observers); anything else it raises, or a result `valid` refuses, is a failure: the entry leaves `active`, `on_failure` is called, and under `"fail"` `HookFailed` is raised (under `"skip"`, `SKIPPED` is returned). `CancelledError` is never caught.
+- `keep_none=True` makes a `None` result keep the value (a chunk hook that passes a chunk on).
+
+**`Failure(middleware, hook, error, timed_out, action)`**: what failed, with what, and whether the guard's timeout did it; `action` is `"skip"` or `"fail"`. Holds no unit data.
+
+**`HookFailed`**: raised under `"fail"`. `failure` is the `Failure`; `__cause__` is what the hook raised (a `TimeoutError` for a timeout). The message names the middleware and the hook, never a value.
+
+**`InvalidResult`**: the `Failure.error` for a result `valid` refused; names the result's type only.
+
+**`Stopped(entry, result)`**: where a phase stopped. **`SKIPPED`**: a call that gave no result (falsy). **`ScopedState(state, name)`**: a `MutableMapping` view storing keys as `"<name>.<key>"`.
+
+**`require_async(middleware, hooks, *, name=None)`**: `TypeError` if any of `hooks` the middleware has isn't `async def`, for refusing sync hooks at registration.
+
+```python
+from interpose.pipeline import HookFailed, Pipeline, Policy
+
+POLICY = Policy(on_error="fail", after_order="reverse", after_local=True, observe_failed=True)
+PIPELINE = Pipeline(chain, POLICY)  # built once
+
+
+async def handle(ctx):
+    run = PIPELINE.start(select=lambda mw: mw.applies(ctx), state=ctx.state)
+    try:
+        await run.before("pre", ctx, lambda mw, c: mw.pre(c), until=lambda _: ctx.responded)
+        result = ctx.response if run.stopped else await operation(ctx)
+        return await run.after("post", result, lambda mw, c, r: mw.post(c, r))
+    except HookFailed as e:
+        await run.observe_ran("failed", lambda mw, c: mw.failed(c, e))
+        raise MyDeny(e.failure.middleware) from e
+```
 
 ## Stability
 
