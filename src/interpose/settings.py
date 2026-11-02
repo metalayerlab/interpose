@@ -17,6 +17,7 @@ secret setting's value. Nothing here does I/O until `Settings.resolve()` is call
 
 from __future__ import annotations
 
+import builtins
 import datetime
 import os
 import re
@@ -24,7 +25,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, overload
+from typing import Any, cast, overload
 
 import yaml
 
@@ -63,7 +64,9 @@ class Setting:
     """One setting: its dotted key, default (which sets its type), help and flags.
 
     `prefix` is set by `Settings`, never by hand. `check` gets the coerced value (before it is
-    wrapped in `Secret`) and raises `ValueError` with a reason.
+    wrapped in `Secret`) and raises `ValueError` with a reason. It may return a replacement of the
+    setting's type (`one_of` returns the declared spelling); `None` keeps the value. A secret
+    setting's value can't be replaced (design 0007).
     """
 
     key: str
@@ -71,7 +74,7 @@ class Setting:
     help: str
     secret: bool = False
     is_list: bool = False
-    check: Callable[[Value], None] | None = None
+    check: Callable[[Value], Value | None] | None = None
     prefix: str = ""
 
     @property
@@ -85,10 +88,58 @@ class Resolved:
 
     `values` holds `Secret` for secret settings and a tuple for list settings. `sources` holds the
     `_FILE` variable's name, the environment variable's name, `"file"` or `"default"`.
+
+    The typed accessors (`str`, `int`, `bool`, `list`, `secret`) give a value with its type, and
+    raise `TypeError` naming the key when the setting is another kind (`str()` on a secret
+    setting, above all), or `KeyError` for a key that isn't declared (design 0007).
     """
 
-    values: Mapping[str, Value]
-    sources: Mapping[str, str]
+    values: Mapping[builtins.str, Value]
+    sources: Mapping[builtins.str, builtins.str]
+
+    def _kind(self, key: builtins.str, kind: builtins.str) -> Value:
+        value = self.values[key]
+        if _kind_of(value) != kind:
+            hint = ": use secret() and reveal()" if isinstance(value, Secret) else ""
+            raise TypeError(f"{key!r} is a {_kind_of(value)} setting, not {kind}{hint}")
+        return value
+
+    def str(self, key: builtins.str) -> builtins.str:
+        """A str setting's value. A secret setting is `TypeError`: use `secret()`."""
+        return cast(builtins.str, self._kind(key, "str"))
+
+    def int(self, key: builtins.str) -> builtins.int:
+        """An int setting's value (never a bool)."""
+        return cast(builtins.int, self._kind(key, "int"))
+
+    def bool(self, key: builtins.str) -> builtins.bool:
+        """A bool setting's value."""
+        return cast(builtins.bool, self._kind(key, "bool"))
+
+    def list(self, key: builtins.str) -> tuple[builtins.str, ...]:
+        """A list setting's value."""
+        return cast(tuple[builtins.str, ...], self._kind(key, "list"))
+
+    def secret(self, key: builtins.str) -> Secret:
+        """A secret setting's value; `reveal()` it at the point of use."""
+        return cast(Secret, self._kind(key, "secret"))
+
+
+def _kind_of(value: object) -> str:
+    """The kind of setting a resolved value comes from: exact, since coercion is strict."""
+    if isinstance(value, Secret):
+        return "secret"
+    if isinstance(value, tuple):
+        return "list"
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int):
+        return "int"
+    if isinstance(value, str):
+        return "str"
+    return (
+        "other"  # only a check's replacement can be anything else (a list is not a list setting's)
+    )
 
 
 class Settings(Sequence[Setting]):
@@ -233,7 +284,7 @@ def _resolve_one(
     value = _coerce(setting, raw, source)
     if setting.check is not None:
         try:
-            setting.check(value)
+            replacement = setting.check(value)
         except ValueError as e:
             reason = str(e)
             if setting.secret and isinstance(value, str) and value:
@@ -242,13 +293,38 @@ def _resolve_one(
                 for form in sorted({value, repr(value)[1:-1], ascii(value)[1:-1]}, key=len)[::-1]:
                     reason = reason.replace(form, MASK)
             raise ConfigError(f"{setting.key}: {reason}") from None
+        if replacement is not None:
+            value = _replace(setting, value, replacement)
     if setting.secret:
         # Settings only allows str secrets, so the coerced value is a str.
         return Secret(str(value)), source
     return value, source
 
 
-def _coerce(setting: Setting, raw: Any, source: str) -> str | int | bool | tuple[str, ...]:
+_Plain = str | int | bool | tuple[str, ...]  # a value before `secret=True` wraps it
+_EXPECTED = {"str": "str", "int": "int", "bool": "bool", "list": "a tuple of str"}
+
+
+def _replace(setting: Setting, value: _Plain, replacement: Value) -> _Plain:
+    """A check's replacement, if it is the setting's kind. Errors name types, never values."""
+    if type(replacement) is type(value) and replacement == value:
+        return value  # "validate and return the value" is no replacement, secret or not
+    if setting.secret:
+        # A replacement would be a second spelling of a secret that nobody configured; a check
+        # that computed one could also have leaked it. Refused (design 0007).
+        raise ConfigError(f"{setting.key}: a check can't replace a secret setting's value")
+    expected, got = _kind_of(value), _kind_of(replacement)
+    if got != expected:
+        raise ConfigError(
+            f"{setting.key}: its check returned {type(replacement).__name__}, "
+            f"expected {_EXPECTED[expected]}"
+        )
+    if isinstance(replacement, tuple) and not all(isinstance(i, str) for i in replacement):
+        raise ConfigError(f"{setting.key}: its check returned a tuple with a non-str item")
+    return cast(_Plain, replacement)
+
+
+def _coerce(setting: Setting, raw: Any, source: str) -> _Plain:
     """Give raw (a string from a file or the environment, or a YAML value) the setting's type."""
     result: str | int | bool | tuple[str, ...] | None
     if setting.is_list:
@@ -333,18 +409,25 @@ def non_negative(value: Value) -> None:
         raise ValueError(f"must be 0 or more, got {value}")
 
 
-def one_of(*choices: str) -> Callable[[Value], None]:
-    """One of `choices`, in any case. The value keeps the case it was given in."""
+def one_of(*choices: str) -> Callable[[Value], str | None]:
+    """One of `choices`, in any case; the value becomes the declared spelling (`info` resolves to
+    `INFO` when `INFO` is declared). A value already spelled as declared is kept as it is."""
     if not choices:
         raise ValueError("one_of() needs at least one choice")
-    allowed = {choice.lower() for choice in choices}
+    canonical: dict[str, str] = {}
+    for choice in choices:
+        canonical.setdefault(choice.lower(), choice)  # the first declared spelling wins
+    exact = frozenset(choices)
     listed = ", ".join(choices)
 
-    def check(value: Value) -> None:
+    def check(value: Value) -> str | None:
         if not isinstance(value, str):
             raise ValueError(f"expected one of {listed}")
-        if value.lower() not in allowed:
+        if value in exact:
+            return None
+        if value.lower() not in canonical:
             raise ValueError(f"expected one of {listed}, got {value!r}")
+        return canonical[value.lower()]
 
     return check
 

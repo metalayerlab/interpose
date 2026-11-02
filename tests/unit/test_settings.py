@@ -583,9 +583,19 @@ class TestChecks:
         with pytest.raises(ValueError, match=r"^expected int$"):
             check(value)
 
-    @pytest.mark.parametrize("value", ["INFO", "info", "Debug", "error"])
-    def test_one_of_ignores_case(self, value: str) -> None:
-        one_of("DEBUG", "INFO", "WARNING", "ERROR")(value)
+    @pytest.mark.parametrize(
+        ("value", "spelling"),
+        [("INFO", None), ("info", "INFO"), ("Debug", "DEBUG"), ("error", "ERROR")],
+    )
+    def test_one_of_matches_any_case_and_gives_the_declared_spelling(
+        self, value: str, spelling: str | None
+    ) -> None:
+        assert one_of("DEBUG", "INFO", "WARNING", "ERROR")(value) == spelling
+
+    def test_one_of_keeps_an_exact_match_and_prefers_the_first_spelling(self) -> None:
+        check = one_of("a", "A", "b")
+        assert check("a") is None and check("A") is None
+        assert check("B") == "b"
 
     def test_one_of_bad(self) -> None:
         with pytest.raises(ValueError, match=r"^expected one of DEBUG, INFO, got 'LOUD'$"):
@@ -627,9 +637,47 @@ class TestChecks:
         with pytest.raises(ConfigError, match=r"^l: listed twice$"):
             settings.resolve(DEFAULT, {"APP_L": "a,a"})
 
-    def test_one_of_keeps_the_given_case(self) -> None:
-        settings = make(Setting("log_level", "INFO", "", check=one_of("DEBUG", "INFO")))
-        assert settings.resolve(DEFAULT, {"APP_LOG_LEVEL": "debug"}).values["log_level"] == "debug"
+    def test_one_of_resolves_to_the_declared_spelling(self) -> None:
+        # Issue #8: `info` resolves to `INFO` when `INFO` is declared; the default too.
+        settings = make(Setting("log_level", "info", "", check=one_of("DEBUG", "INFO")))
+        assert settings.resolve(DEFAULT, {"APP_LOG_LEVEL": "debug"}).values["log_level"] == "DEBUG"
+        assert settings.resolve(DEFAULT, {}).values["log_level"] == "INFO"
+
+    @pytest.mark.parametrize(
+        ("default", "replacement", "is_list"),
+        [("", "x", False), (1, 2, False), (False, True, False), ("", ("a", "b"), True)],
+    )
+    def test_a_check_may_replace_the_value_with_its_kind(
+        self, default: str | int | bool, replacement: Value, is_list: bool
+    ) -> None:
+        settings = make(Setting("v", default, "", is_list=is_list, check=lambda _: replacement))
+        assert settings.resolve(DEFAULT, {}).values["v"] == replacement
+
+    def test_a_check_that_returns_the_same_value_changes_nothing(self) -> None:
+        settings = make(Setting("v", 1, "", check=lambda v: v))
+        assert settings.resolve(DEFAULT, {}).values["v"] == 1
+
+    @pytest.mark.parametrize(
+        ("default", "replacement", "is_list", "message"),
+        [
+            ("", 5, False, "v: its check returned int, expected str"),
+            (1, "1", False, "v: its check returned str, expected int"),
+            (1, True, False, "v: its check returned bool, expected int"),
+            (False, 0, False, "v: its check returned int, expected bool"),
+            ("", "a", True, "v: its check returned str, expected a tuple of str"),
+            ("", ("a", 1), True, "v: its check returned a tuple with a non-str item"),
+            ("", 0.5, False, "v: its check returned float, expected str"),
+            ("", Secret("x"), False, "v: its check returned Secret, expected str"),
+            ("", ["a"], True, "v: its check returned list, expected a tuple of str"),
+        ],
+    )
+    def test_a_replacement_of_another_kind_is_a_config_error(
+        self, default: str | int | bool, replacement: Any, is_list: bool, message: str
+    ) -> None:
+        settings = make(Setting("v", default, "", is_list=is_list, check=lambda _: replacement))
+        with pytest.raises(ConfigError) as info:
+            settings.resolve(DEFAULT, {})
+        assert str(info.value) == message
 
     def test_other_exceptions_propagate(self) -> None:
         def broken(value: Value) -> None:
@@ -705,6 +753,23 @@ class TestSecretSettings:
             assert form not in message
         assert MASK in message
 
+    def test_a_check_cant_replace_a_secret(self) -> None:
+        settings = make(Setting("t", "", "", secret=True, check=lambda v: f"{v}-changed"))
+        with pytest.raises(ConfigError) as info:
+            settings.resolve(DEFAULT, {"APP_T": VALUE})
+        assert str(info.value) == "t: a check can't replace a secret setting's value"
+        assert VALUE not in repr(info.value) and info.value.__cause__ is None
+
+    def test_a_check_on_a_secret_may_return_the_value_unchanged(self) -> None:
+        settings = make(Setting("t", "", "", secret=True, check=lambda v: v))
+        assert settings.resolve(DEFAULT, {"APP_T": VALUE}).secret("t").reveal() == VALUE
+
+    def test_one_of_on_a_secret_keeps_the_declared_spelling_only(self) -> None:
+        settings = make(Setting("t", "", "", secret=True, check=one_of("Alpha", "Beta")))
+        assert settings.resolve(DEFAULT, {"APP_T": "Beta"}).secret("t") == Secret("Beta")
+        with pytest.raises(ConfigError, match="can't replace a secret"):
+            settings.resolve(DEFAULT, {"APP_T": "beta"})
+
     def test_check_gets_the_plain_value(self) -> None:
         seen: list[Value] = []
         settings = make(Setting("t", "", "", secret=True, check=seen.append))
@@ -770,9 +835,75 @@ def test_a_consumer_config(tmp_path: Path) -> None:
         "intercept.hosts": "file",
         "upstream.idle_timeout_ms": "default",
     }
-    assert r.values["log_level"] == "debug"
+    assert r.values["log_level"] == "DEBUG"  # the declared spelling (design 0007)
     assert r.values["proxy.port"] == 8888
     assert r.values["proxy.auth"] == Secret("u:p")
     assert r.values["proxy.access_log"] is True
     assert r.values["intercept.hosts"] == ("example.org",)
     assert r.values["upstream.idle_timeout_ms"] == 60000
+    # The typed accessors give the same values with their types (design 0007).
+    assert r.str("log_level") == "DEBUG"
+    assert r.int("proxy.port") == 8888
+    assert r.secret("proxy.auth").reveal() == "u:p"
+    assert r.bool("proxy.access_log") is True
+    assert r.list("intercept.hosts") == ("example.org",)
+
+
+# --- typed accessors (design 0007) ---------------------------------------------------------------
+
+KINDS = (
+    Setting("s", "text", ""),
+    Setting("i", 3, ""),
+    Setting("b", True, ""),
+    Setting("l", "", "", is_list=True),
+    Setting("k", "", "", secret=True),
+)
+
+
+class TestTypedAccessors:
+    def resolved(self) -> Resolved:
+        return make(*KINDS).resolve(DEFAULT, {"APP_L": "a,b", "APP_K": VALUE})
+
+    def test_each_accessor_gives_its_kind(self) -> None:
+        r = self.resolved()
+        assert r.str("s") == "text"
+        assert r.int("i") == 3
+        assert r.bool("b") is True
+        assert r.list("l") == ("a", "b")
+        assert r.secret("k").reveal() == VALUE
+
+    @pytest.mark.parametrize(
+        ("accessor", "key", "kind"),
+        [
+            ("str", "i", "int"),
+            ("str", "b", "bool"),
+            ("str", "l", "list"),
+            ("int", "b", "bool"),
+            ("int", "s", "str"),
+            ("bool", "i", "int"),
+            ("list", "s", "str"),
+            ("secret", "s", "str"),
+        ],
+    )
+    def test_another_kind_is_a_type_error_naming_the_key(
+        self, accessor: str, key: str, kind: str
+    ) -> None:
+        with pytest.raises(TypeError) as info:
+            getattr(self.resolved(), accessor)(key)
+        assert str(info.value) == f"{key!r} is a {kind} setting, not {accessor}"
+
+    @pytest.mark.parametrize("accessor", ["str", "int", "bool", "list"])
+    def test_a_secret_setting_is_a_type_error_that_never_shows_the_value(
+        self, accessor: str
+    ) -> None:
+        # Issue #13: `str()` on a secret setting would give the mask, silently.
+        with pytest.raises(TypeError) as info:
+            getattr(self.resolved(), accessor)("k")
+        message = str(info.value)
+        assert message == f"'k' is a secret setting, not {accessor}: use secret() and reveal()"
+        assert VALUE not in message
+
+    @pytest.mark.parametrize("accessor", ["str", "int", "bool", "list", "secret"])
+    def test_a_missing_key_is_a_key_error(self, accessor: str) -> None:
+        with pytest.raises(KeyError):
+            getattr(self.resolved(), accessor)("nope")
