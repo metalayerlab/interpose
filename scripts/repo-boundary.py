@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Claude Code PreToolUse hook: keep file edits inside this repository.
 
-Template-owned: changes come from project-template through `copier update` (its design
-record 0013). Stdlib only (Python >= 3.11) plus git, so it runs in any layer's project.
+Template-owned: template-base; changes come through `copier update` (its decision 0001).
+Stdlib only (Python >= 3.11) plus git, so it runs in any stack's project.
 
 Another codebase is changed by an issue in its own repository, never from here (AGENTS.md).
 So an Edit, Write or NotebookEdit is denied when its path belongs to another repository (a

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate the generated sections of docs/wiki/ from the code.
+"""Regenerate the generated sections of docs/wiki/ from the code. Template-owned: template-python.
 
     uv run scripts/gen-wiki.py           # rewrite the sections
     uv run scripts/gen-wiki.py --check   # CI: fail if any section is stale
@@ -11,7 +11,7 @@ A generated section sits between markers, and everything between them is replace
     <!-- generated:end settings -->
 
 Blocks: settings (config.SETTINGS), cli (the Typer app), http-api (the OpenAPI schema).
-Write prose around the markers, never inside them. Template-owned (Python layer).
+Write prose around the markers, never inside them.
 """
 
 from __future__ import annotations

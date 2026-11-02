@@ -1,5 +1,5 @@
-# Template-owned. Weekly dependency PRs; "chore(deps)" keeps them out of the
-# changelog's headline sections.
+# Template-owned: template-python (a slot: the stack overlay adds its ecosystems).
+# Weekly dependency PRs; "chore(deps)" keeps them out of the changelog's headline sections.
 version: 2
 updates:
   - package-ecosystem: github-actions
