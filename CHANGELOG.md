@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/metalayerlab/interpose/compare/v0.1.0...v0.1.1) (2026-11-02)
+
+
+### ✨ Features
+
+* metrics with declared label sets (design 0002) ([44e4196](https://github.com/metalayerlab/interpose/commit/44e4196fae838803f676a1e696790eecad5f32da))
+
 ## 0.1.0 (2026-11-02)
 
 
