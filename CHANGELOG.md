@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/metalayerlab/interpose/compare/v0.1.1...v0.1.2) (2026-11-02)
+
+
+### ✨ Features
+
+* pipeline core with per-project and per-middleware failure policy (design 0003) ([4692653](https://github.com/metalayerlab/interpose/commit/4692653217ecc743e9bd66121ea4a951c62351ce))
+
 ## [0.1.1](https://github.com/metalayerlab/interpose/compare/v0.1.0...v0.1.1) (2026-11-02)
 
 
