@@ -100,6 +100,9 @@ class Settings(Sequence[Setting]):
     def __init__(self, prefix: str, settings: Iterable[Setting], *, default_path: Path) -> None:
         bound: list[Setting] = []
         seen: set[str] = set()
+        # Every variable name a setting reads, so no one variable feeds two settings
+        # (`a.b` and `a_b` are both APP_A_B; `x_file`'s variable is `x`'s _FILE variable).
+        names: dict[str, str] = {prefix + "CONFIG": "the config file variable"}
         for setting in settings:
             if not _KEY.fullmatch(setting.key):
                 raise ValueError(
@@ -107,6 +110,16 @@ class Settings(Sequence[Setting]):
                 )
             if setting.key in seen:
                 raise ValueError(f"{setting.key!r}: declared twice")
+            for part in setting.key.split("."):
+                if not _is_yaml_str(part):
+                    # pyyaml loads `on`, `no`, `null` or `1` as a bool, None or int key, so
+                    # the file's value would never be found under the string.
+                    raise ValueError(f"{setting.key!r}: YAML doesn't read {part!r} as a string")
+            env = prefix + setting.key.upper().replace(".", "_")
+            for name in (env, env + "_FILE"):
+                if name in names:
+                    raise ValueError(f"{setting.key!r}: {name} is also {names[name]}")
+                names[name] = f"read by {setting.key!r}"
             if setting.is_list and setting.default != "":
                 raise ValueError(f'{setting.key!r}: a list setting\'s default must be ""')
             if setting.secret and (setting.is_list or not isinstance(setting.default, str)):
@@ -180,6 +193,12 @@ def _read_yaml(path: Path) -> Mapping[str, Any]:
     return loaded
 
 
+def _is_yaml_str(part: str) -> bool:
+    """Whether pyyaml loads `part`, as a mapping key, as that string."""
+    loaded = yaml.safe_load(f"{part}: 0")
+    return isinstance(loaded, dict) and list(loaded) == [part]
+
+
 def _lookup(data: Mapping[str, Any], dotted: str) -> Any:
     """The value at a dotted key, or None when it's absent (or null) at any level."""
     node: Any = data
@@ -218,7 +237,10 @@ def _resolve_one(
         except ValueError as e:
             reason = str(e)
             if setting.secret and isinstance(value, str) and value:
-                reason = reason.replace(value, MASK)
+                # The value as written, and inside a repr() or ascii() (escaped backslashes,
+                # quotes, control characters). A check shouldn't echo a secret at all.
+                for form in sorted({value, repr(value)[1:-1], ascii(value)[1:-1]}, key=len)[::-1]:
+                    reason = reason.replace(form, MASK)
             raise ConfigError(f"{setting.key}: {reason}") from None
     if setting.secret:
         # Settings only allows str secrets, so the coerced value is a str.

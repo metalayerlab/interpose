@@ -19,7 +19,7 @@ Import from the submodules, `interpose.settings` and `interpose.secret`. The pac
 **`Settings(prefix, settings, *, default_path)`**: a `Sequence[Setting]`, each one bound to `prefix`.
 
 - `config_env`: `prefix + "CONFIG"`, the variable that names the YAML file. Also `prefix` and `default_path`.
-- Raises `ValueError` for a bad or duplicate key, a list setting whose default isn't `""`, or a secret setting that isn't a str setting.
+- Raises `ValueError` for a bad or duplicate key, a key part YAML doesn't read as a string (`on`, `no`, `null`, `1`), two settings that would read the same variable (`a.b` and `a_b`; `x_file` and `x`'s `_FILE`; a key `config`), a list setting whose default isn't `""`, or a secret setting that isn't a str setting.
 - **`resolve(path=None, environ=None) -> Resolved`**: reads `path` (else `$<PREFIX>CONFIG`, else `default_path`; missing means defaults) and `environ` (else `os.environ`), and resolves every setting. Raises `ConfigError`.
 
 ```python

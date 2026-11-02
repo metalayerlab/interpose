@@ -238,6 +238,9 @@ Where the text above left a choice, v0.1.0 made these:
 
 - **Declaration errors are `ValueError`**, raised by `Settings(...)` at import of the consumer's
   `config.py`; `ConfigError` is for the configuration a user gives.
+- **`Settings` also rejects** two settings that read the same variable (`a.b` and `a_b`; `x_file`
+  and `x`'s `_FILE`; a key `config` and `<PREFIX>CONFIG`), and key parts pyyaml doesn't load as
+  strings (`on`, `no`, `null`, `1`), whose YAML value would never be found.
 - **A secret setting must be a `str` setting** (not a list, int or bool): a `Secret` holds one string.
 - **bool** also takes a YAML `1` or `0`, the same spelling as the strings `"1"` and `"0"`.
 - **int** takes ASCII decimal digits with an optional sign (`int()` also takes `"1_000"`). A YAML
@@ -247,7 +250,7 @@ Where the text above left a choice, v0.1.0 made these:
 - **A YAML `null` means unset**, and so does a scalar where a mapping is expected, as in the three copies.
   Unknown YAML keys are ignored.
 - **`check` runs on every value, the default included**, and a secret setting's value is replaced with
-  `MASK` in the check's reason. A coercion error for a secret setting names the key and type only.
+  `MASK` in the check's reason, as written and as `repr()`/`ascii()` escape it. A coercion error for a secret setting names the key and type only.
 - **YAML syntax errors give the line and column, never the text**: pyyaml's message quotes the line,
   which may hold a secret.
 - **`Secret`** also has `__bool__` (set or not, as mitm-proxy's config hash asks), `__format__` (masked

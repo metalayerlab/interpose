@@ -115,6 +115,24 @@ class TestDeclaration:
         with pytest.raises(ValueError, match="secret setting must be a str"):
             make(setting)
 
+    @pytest.mark.parametrize(
+        ("keys", "name"),
+        [
+            (("a.b", "a_b"), "APP_A_B"),
+            (("x", "x_file"), "APP_X_FILE"),
+            (("x_file", "x"), "APP_X_FILE"),
+            (("config",), "APP_CONFIG"),
+        ],
+    )
+    def test_rejects_shared_variable_names(self, keys: tuple[str, ...], name: str) -> None:
+        with pytest.raises(ValueError, match=rf": {name} is also "):
+            make(*(Setting(k, "", "") for k in keys))
+
+    @pytest.mark.parametrize("key", ["tls.on", "off", "a.yes", "no", "true", "null", "a.1"])
+    def test_rejects_segments_yaml_does_not_read_as_strings(self, key: str) -> None:
+        with pytest.raises(ValueError, match="YAML doesn't read"):
+            make(Setting(key, "", ""))
+
     def test_setting_is_frozen(self) -> None:
         s = Setting("a", "", "")
         with pytest.raises(AttributeError):
@@ -277,9 +295,12 @@ class TestConfigPath:
         def boom(_: str) -> Any:
             raise yaml.YAMLError("no mark here")
 
+        settings = make(PORT)  # declared before the patch: declaring parses key segments
+        path = tmp_path / "config.yaml"
+        path.write_text("a: 1\n", encoding="utf-8")
         monkeypatch.setattr(yaml, "safe_load", boom)
         with pytest.raises(ConfigError, match=r"cannot parse .*config.yaml: invalid YAML$"):
-            resolve_yaml(tmp_path, "a: 1\n", PORT)
+            settings.resolve(path, {})
 
 
 # --- _FILE ---------------------------------------------------------------------------------------
@@ -313,8 +334,8 @@ class TestFileVariable:
 
     def test_coerced_like_any_string(self, tmp_path: Path) -> None:
         assert self.resolve_file(tmp_path, "42\n", PORT).values["listen.port"] == 42
-        r = self.resolve_file(tmp_path, "yes\n", Setting("on", False, ""))
-        assert r.values["on"] is True
+        r = self.resolve_file(tmp_path, "yes\n", Setting("enabled", False, ""))
+        assert r.values["enabled"] is True
         r = self.resolve_file(tmp_path, "a, b\n", Setting("l", "", "", is_list=True))
         assert r.values["l"] == ("a", "b")
 
@@ -667,6 +688,22 @@ class TestSecretSettings:
             settings.resolve(DEFAULT, {"APP_PROXY_AUTH": VALUE})
         assert VALUE not in str(info.value)
         assert str(info.value) == f"proxy.auth: '{MASK}' is not user:password"
+
+    @pytest.mark.parametrize(
+        "value", ["C:\\pw\\x", "tab\there", 'it\'s "quoted"', "caf\u00e9-p\u00e4ss", "nl\nx"]
+    )
+    @pytest.mark.parametrize("fmt", ["{v}", "{v!r}", "{v!a}"])
+    def test_check_reason_is_masked_in_every_form(self, value: str, fmt: str) -> None:
+        def echo(v: Value) -> None:
+            raise ValueError(fmt.format(v=v) + " is not user:password")
+
+        settings = make(Setting("proxy.auth", "", "", secret=True, check=echo))
+        with pytest.raises(ConfigError) as info:
+            settings.resolve(DEFAULT, {"APP_PROXY_AUTH": value})
+        message = str(info.value)
+        for form in (value, repr(value), repr(value)[1:-1], ascii(value)[1:-1]):
+            assert form not in message
+        assert MASK in message
 
     def test_check_gets_the_plain_value(self) -> None:
         seen: list[Value] = []
