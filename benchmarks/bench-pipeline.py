@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Micro-benchmark of interpose.pipeline's guard: microseconds per call, stdlib only.
 
-    uv run scripts/bench-pipeline.py [--n 200000]
+    uv run benchmarks/bench-pipeline.py [--n 200000]
 
 Each case awaits a no-op hook, so the numbers are the pipeline's own cost. They vary by machine
 and run; compare runs on one machine (say, this checkout against `PYTHONPATH=<other>/src`). The

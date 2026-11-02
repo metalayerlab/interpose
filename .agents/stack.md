@@ -28,6 +28,7 @@ Python >= 3.13 with uv: always `uv run`, never `pip install` or activate the ven
 | `docs/wiki/`, `docs/design/` | The wiki (`.standard.toml`, T); design records |
 | `docs/ai/` | Prompts, review checklist (T) |
 | `contrib/` | `system-packages.txt` (apt `build:`/`runtime:`) |
+| `benchmarks/` | Manual benchmarks (`bench-pipeline.py`); not run by pytest or CI |
 | `CHANGELOG.md`, `pyproject.toml` version, `.release-please-manifest.json` | release-please only |
 
 ## Conventions

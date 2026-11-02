@@ -42,10 +42,12 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "S", "T20"]
 # assert is how pytest checks; scripts print, and run git, by design.
 "tests/*" = ["S101"]
 "scripts/*" = ["T20", "S603", "S607"]
+# benchmarks print their results.
+"benchmarks/*" = ["T20"]
 
 [tool.mypy]
 strict = true
-files = ["src/interpose", "tests", "scripts"]
+files = ["src/interpose", "tests", "scripts", "benchmarks"]
 
 [tool.pytest.ini_options]
 addopts = "-q --strict-markers --strict-config --cov --cov-report=term-missing:skip-covered"
