@@ -19,6 +19,7 @@ CI runs the unit tests on every supported Python version, together with ruff, my
 
 | `tests/unit/test_settings.py` | Declarations, the lookup order and sources, coercion of each type from YAML, the environment and `_FILE`, the checks, secret settings |
 | `tests/unit/test_secret.py` | `Secret` masking (str, repr, f-strings, logging, exceptions) and `read_secret_dir` |
+| `tests/unit/test_pipeline.py` | The guard (timing, timeouts, failures, answers, `valid`), each phase, every `Policy` field, and both consumers' semantics rebuilt on it (mitm-proxy fail-open, sluice onion and fail-closed) |
 | `tests/unit/test_metrics.py` | Label sets enforced on every call, declaration checks, the text format, and parity with mitm-proxy's `/metrics` lines |
 
 There are no fixtures beyond pytest's own: tests write YAML and secret files under `tmp_path` and pass `environ` as a plain dict, so the real environment never leaks in.
@@ -33,5 +34,6 @@ There are no fixtures beyond pytest's own: tests write YAML and secret files und
 - **Pass `environ`, don't patch `os.environ`.** `Settings.resolve(path, environ)` takes both, so a test controls every input. Use `monkeypatch.setenv` only to test the `os.environ` default itself.
 - **Test each coercion case from both YAML and the environment.** YAML has already typed the value (`0.5` is a float, `yes` a bool), the environment hasn't; that difference is where the copies drifted.
 - **Secrets:** assert the value is absent from `str()`, `repr()`, the exception message and `caplog.text`, not only that the mask is present.
+- **Async tests** use `asyncio.run` directly: there is no pytest-asyncio dependency.
 - **Coverage:** interpose is every consumer's settings engine, so keep it at 100% branch coverage even though the floor is 80%.
 - If `/tmp` is short of space, run with `--basetemp` under the repository (a git-ignored path).

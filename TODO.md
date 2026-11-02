@@ -10,7 +10,6 @@ the team (and its AI assistants) should know at a glance.
   lands, each consumer needs a scheduled workflow that opens a PR when interpose has a newer tag; it belongs
   in the template that generates consumers (template-python), not here. Revisit when #16151 merges: it
   covers `[tool.uv.sources]` `tag =` only.
-- [ ] Design 0003 (pipeline core).
 
 ## Decided against (don't re-propose without reading this first)
 
@@ -20,3 +19,8 @@ the team (and its AI assistants) should know at a glance.
 - A float setting type: no setting needs one; time settings are integer `_ms` (design 0001).
 - `prometheus_client`: a dependency for a small format, its default collectors add series, and its label values are unbounded (design 0002).
 - Folding undeclared label values into an `other` series: hides the bug; an undeclared value is a `ValueError` (design 0002).
+- Defaults for the pipeline's semantics (`on_error`, `after_order`, `after_local`, `observe_failed`): a default hands one project's semantics to the next (design 0003).
+- An interpose `Middleware` base class with hook methods: the consumers' hook vocabularies differ; the core takes `invoke` callables (design 0003).
+- Mapping hook failures to a deny inside interpose: a 502 or an errno is transport; `HookFailed` carries what a mapper needs (design 0003).
+- Retrying a failed hook, or killing the unit: undefined after side effects (mitm-proxy 0001); `"fail"` is a deny answer (design 0003).
+- Built-in middleware (a `Snapshot`/TTL cache, ...) or preset policies: mechanism only, as sluice's 0002 rules (design 0003).
