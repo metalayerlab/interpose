@@ -3,9 +3,11 @@
 
     uv run benchmarks/bench-pipeline.py [--n 200000]
 
-Each case awaits a no-op hook, so the numbers are the pipeline's own cost. They vary by machine
-and run; compare runs on one machine (say, this checkout against `PYTHONPATH=<other>/src`). The
-wiki's Architecture-Internals page has the reference numbers. Not a test: nothing asserts timings.
+Each case awaits a no-op hook, so the numbers are the pipeline's own cost. The last two are
+sluice's chains (its record 0008), with every hook awaited and with `skip_inherited`. Numbers vary
+by machine and run; compare runs on one machine (say, this checkout against
+`PYTHONPATH=<other>/src`). The wiki's Architecture-Internals page has the reference numbers. Not a
+test: nothing asserts timings.
 """
 
 from __future__ import annotations
@@ -32,14 +34,71 @@ async def _noop() -> None:
     return None
 
 
-def _policy(timeout: float | None) -> Policy:
+def _policy(timeout: float | None, skip_inherited: type | None = None) -> Policy:
     return Policy(
         on_error="fail",
         after_order="reverse",
         after_local=True,
         observe_failed=True,
         timeout=timeout,
+        skip_inherited=skip_inherited,
     )
+
+
+class Base:
+    """A sluice-shaped base class: every hook does nothing."""
+
+    async def pre(self, ctx: Any) -> None:
+        return None
+
+    async def post(self, ctx: Any, value: Any) -> Any:
+        return value
+
+    async def failed(self, ctx: Any, error: Exception) -> None:
+        return None
+
+
+class Gate(Base):
+    async def pre(self, ctx: Any) -> None:
+        return None
+
+
+class Log(Base):
+    async def pre(self, ctx: Any) -> None:
+        return None
+
+    async def post(self, ctx: Any, value: Any) -> Any:
+        return value
+
+    async def failed(self, ctx: Any, error: Exception) -> None:
+        return None
+
+
+class Rewrite(Base):
+    async def pre(self, ctx: Any) -> None:
+        return None
+
+    async def post(self, ctx: Any, value: Any) -> Any:
+        return value
+
+
+def _instance_gate() -> Base:
+    # A plain `async def` gate, set on the instance (sluice's `as_middleware`).
+    mw = Base()
+
+    async def pre(ctx: Any) -> None:
+        return None
+
+    mw.pre = pre  # type: ignore[method-assign]  # an instance hook is what's measured
+    return mw
+
+
+# sluice record 0008: on a successful call, 2 of typical's 10 hooks are the base's no-ops, and 5
+# of gates'.
+CHAINS: dict[str, Callable[[], list[Base]]] = {
+    "typical": lambda: [Gate(), Log(), Rewrite(), Rewrite(), _instance_gate()],
+    "gates": lambda: [Gate(), Gate(), Gate(), Gate(), _instance_gate()],
+}
 
 
 async def _time(fn: Callable[[], Awaitable[Any]], n: int) -> float:
@@ -89,6 +148,24 @@ async def main(n: int) -> None:
     print(f"Python {sys.version.split()[0]}, n={n}")
     for label, fn, count in cases:
         print(f"{label:52s} {await _time(fn, count):7.2f} µs")
+
+    def chain_unit(p: Pipeline[Base]) -> Callable[[], Awaitable[Any]]:
+        async def unit() -> None:
+            r = p.start()
+            await r.before("pre", None, lambda mw, c: mw.pre(c), until=lambda _: False)
+            await r.after("post", None, lambda mw, c, v: mw.post(c, v))
+
+        return unit
+
+    for name, make in CHAINS.items():
+        # Alternate, best of three, so drift in the machine's load hits both sides alike.
+        off: list[float] = []
+        on: list[float] = []
+        for _ in range(3):
+            off.append(await _time(chain_unit(Pipeline(make(), _policy(None))), n // 8))
+            on.append(await _time(chain_unit(Pipeline(make(), _policy(None, Base))), n // 8))
+        label = f"unit, {name} chain: every hook / skip_inherited"
+        print(f"{label:52s} {min(off):7.2f} µs {min(on):7.2f} µs")
 
 
 if __name__ == "__main__":

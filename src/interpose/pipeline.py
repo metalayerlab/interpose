@@ -86,6 +86,7 @@ SKIPPED = _Skipped()
 # What the guard gives for a hook `skip_inherited` leaves out. Private: `call`, `fold`, `after`
 # and observers turn it into SKIPPED (or keep the value); `each` and `before` into None.
 _INHERITED = _Skipped()
+_MISSING = object()  # a base attribute `dir` lists but `getattr` can't read: never inherited
 _clock = time.perf_counter
 
 
@@ -124,7 +125,9 @@ class Policy:
     - `skip_inherited`: the project's base class, whose hooks must do nothing; a hook a
       middleware doesn't override (in its class or on the instance) isn't called at all (no
       timing). In `each` and `before` it counts as having returned `None`, so `until` is still
-      asked; elsewhere it gives `SKIPPED`. `None` calls every hook.
+      asked; elsewhere it gives `SKIPPED`. `None` calls every hook. Overrides are resolved once,
+      when the `Pipeline` is built: a hook assigned later (on the instance or its class) isn't
+      seen, so set instance hooks before building it.
     """
 
     on_error: OnError
@@ -302,6 +305,32 @@ class Pipeline[M]:
         self.entries: tuple[Entry[M], ...] = tuple(
             m if isinstance(m, Entry) else Entry.of(m) for m in middleware
         )
+        # `skip_inherited`, resolved once per entry here rather than per call (#25): the hooks
+        # each entry leaves to the base. A hook assigned on the instance after this isn't seen.
+        self._inherited: dict[Entry[M], frozenset[str]] = {}
+        if policy.skip_inherited is not None:
+            for entry in self.entries:
+                self._inherited_hooks(entry)
+
+    def _inherited_hooks(self, entry: Entry[M]) -> frozenset[str]:
+        """The hooks `skip_inherited` leaves out for this entry, worked out and cached: the
+        base defines them and the middleware neither overrides them in its class nor sets them
+        on the instance. An entry the pipeline wasn't built with (a project changed
+        `Run.entries`) is resolved on its first call."""
+        # Only asked when `skip_inherited` is set.
+        base = cast(type, self.policy.skip_inherited)
+        mw = entry.middleware
+        # A hook assigned on the instance (`mw.pre = gate`) is an override too: looking at the
+        # class alone would skip it, and a skipped gate fails open (issue #12).
+        own = getattr(mw, "__dict__", None) or {}
+        cls = type(mw)
+        hooks = frozenset(
+            hook
+            for hook in dir(base)
+            if hook not in own and getattr(cls, hook, None) is getattr(base, hook, _MISSING)
+        )
+        self._inherited[entry] = hooks
+        return hooks
 
     @property
     def names(self) -> list[str]:
@@ -379,20 +408,6 @@ class Run[M]:
     def _action(self, entry: Entry[M]) -> OnError:
         return entry.on_error or self.policy.on_error
 
-    def _inherited(self, entry: Entry[M], hook: str) -> bool:
-        """Whether `skip_inherited` says not to call this hook: the base defines it and the
-        middleware neither overrides it in its class nor sets it on the instance."""
-        base = self.policy.skip_inherited
-        if base is None or not hasattr(base, hook):
-            return False
-        mw = entry.middleware
-        # A hook assigned on the instance (`mw.pre = gate`) is an override too: looking at the
-        # class alone would skip it, and a skipped gate fails open (issue #12).
-        own = getattr(mw, "__dict__", None)
-        if own is not None and hook in own:
-            return False
-        return getattr(type(mw), hook, None) is getattr(base, hook)
-
     def _fail(
         self,
         entry: Entry[M],
@@ -437,8 +452,13 @@ class Run[M]:
         policy = self.pipeline.policy
         if entry in self._failed and not (observing and policy.observe_failed):
             return SKIPPED
-        if policy.skip_inherited is not None and self._inherited(entry, hook):
-            return _INHERITED
+        if policy.skip_inherited is not None:
+            # A dict and a set lookup: resolved when the pipeline was built (#25).
+            inherited = self.pipeline._inherited.get(entry)
+            if inherited is None:
+                inherited = self.pipeline._inherited_hooks(entry)
+            if hook in inherited:
+                return _INHERITED
         timeout = entry.timeout
         if timeout is None:
             timeout = policy.timeout
