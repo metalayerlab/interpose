@@ -38,4 +38,11 @@ Releases are automated by [release-please](https://github.com/googleapis/release
 - **Force a version:** a commit with `Release-As: 1.0.0` in its body (an empty `chore:` commit is fine) makes the next Release PR use that version.
 - **Hotfix:** a `fix:` PR to `main` and a release as usual. There are no long-lived release branches.
 
+## Dependencies pinned to a git tag
+
+Dependabot can't update a dependency pinned to a GitHub tag, such as `"NAME @ git+https://github.com/OWNER/REPO@v1.2.3"`: it looks the bare name up on PyPI instead. The weekly *Tag check* workflow (`python-tag-check.yml`, Monday 05:00 UTC) does it: for each such pin, in `[project]` dependencies, optional dependencies, dependency groups or a `[tool.uv.sources]` `tag =`, it finds the repository's highest `vX.Y.Z` tag and opens one PR, `chore(deps): bump NAME from vOLD to vNEW` on `tag-check/NAME`, with the pin's line rewritten and `uv lock --upgrade-package NAME`. A major bump, or a minor one below 1.0, adds "(breaking)" to the title. Branch, commit and pre-release pins are listed in the job summary and never bumped. `scripts/tag-check.py --dry-run` shows what it would do.
+
+- **Treat a Dependabot PR for such a name as suspect:** it proposes whatever PyPI has under that name, which may be someone else's package. Close it.
+- Without the release App, CI doesn't run on these PRs: close and reopen one to run it. A private dependency needs the App, installed on that repository.
+
 Setup note for maintainers: Release PRs opened with the default `GITHUB_TOKEN` don't trigger CI. The organisation's release GitHub App (`RELEASE_APP_CLIENT_ID` variable, `RELEASE_APP_PRIVATE_KEY` secret) fixes that; see template-python's README.
