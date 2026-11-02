@@ -13,7 +13,7 @@ Import from the submodules: `interpose.settings`, `interpose.secret`, `interpose
 - `help`: Markdown, as users read it in the generated settings table.
 - `secret`: the value resolves to a `Secret`. Only for str settings.
 - `is_list`: the value is a `tuple[str, ...]`, from a YAML list or a comma-separated string.
-- `check`: a callable that gets the coerced value and raises `ValueError(reason)` if it's invalid.
+- `check`: a callable that gets the coerced value and raises `ValueError(reason)` if it's invalid. It may return a replacement of the setting's kind (a `str`, an `int` that isn't a `bool`, a `bool`, a `tuple` of `str`); `None` keeps the value. Returning the value unchanged keeps it. A replacement of another kind is a `ConfigError` naming the key and the type, never the value. A check on a secret setting must return `None` (or the value unchanged).
 - `env` (property): the environment variable, the prefix plus the upper-cased key with dots as underscores (`MYAPP_LISTEN_PORT`). `prefix` is set by `Settings`, never by hand.
 
 **`Settings(prefix, settings, *, default_path)`**: a `Sequence[Setting]`, each one bound to `prefix`.
@@ -31,17 +31,26 @@ r.values["listen.port"], r.sources["listen.port"]  # (9090, "MYAPP_LISTEN_PORT")
 
 - `values[key]`: the typed value, a `Value` (`str | int | bool | tuple[str, ...] | Secret`).
 - `sources[key]`: `"<PREFIX><KEY>_FILE"`, `"<PREFIX><KEY>"`, `"file"` or `"default"`.
+- **Typed accessors** `str(key)`, `int(key)` (never a `bool`), `bool(key)`, `list(key)` (a `tuple[str, ...]`) and `secret(key)` (a `Secret`) give a value with its type instead of a `cast()`. Each raises `TypeError` naming the key when the setting is another kind; on a secret setting, every one but `secret()` does, so a masked `"********"` can't reach a credential. A key that isn't declared is a `KeyError`.
+
+```python
+r.str("log_level")  # "INFO"
+r.int("listen.port")  # 9090
+r.secret("upstream.token").reveal()
+# TypeError: 'upstream.token' is a secret setting, not str: use secret() and reveal()
+r.str("upstream.token")
+```
 
 **`ConfigError`**: the configuration can't be read, or a value in it is invalid. The message names the key, the expected type and the source, and never holds a secret setting's value.
 
-**Checks**, for `check=`. Each raises `ValueError`, which `resolve()` turns into `ConfigError("<key>: <reason>")`:
+**Checks**, for `check=`. Each raises `ValueError`, which `resolve()` turns into `ConfigError("<key>: <reason>")`; `one_of` also replaces the value:
 
 | Check | Passes |
 |---|---|
 | `port` | an int from 1 to 65535 |
 | `positive` | an int above 0 |
 | `non_negative` | an int, 0 or more |
-| `one_of(*choices)` | a str equal to one of `choices`, in any case (the value keeps its case) |
+| `one_of(*choices)` | a str equal to one of `choices`, in any case; the value becomes the declared spelling (`info` → `INFO`) |
 
 ### `interpose.secret`
 

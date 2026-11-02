@@ -12,7 +12,7 @@ It trusts the files and environment it's pointed at. A config file can set any d
 - CI scans every commit with gitleaks, and secrets in history fail the build.
 - **`secret=True` settings resolve to `Secret`**, which prints as `********` in `str()`, `repr()`, f-strings, `%`-formatting, logging and exception messages. Only `reveal()` gives the value: call it at the point of use, never earlier.
 - **Never `str()` a `Secret` to get its value**: you get `********`. That is a safe failure, but it's a bug.
-- **Error messages never hold a secret setting's value**: a coercion error names the key and type only, and a `check`'s reason has the value masked. YAML syntax errors give a position, never the offending line.
+- **Error messages never hold a secret setting's value**: a coercion error names the key and type only, and a `check`'s reason has the value masked. A check can't replace a secret setting's value, and `Resolved.str()` (or any accessor but `secret()`) on a secret setting is a `TypeError`, so the mask can't be sent as a credential. YAML syntax errors give a position, never the offending line.
 - **Prefer `_FILE` for secrets** (Docker and Kubernetes secrets) over environment variables, which child processes inherit and `/proc/<pid>/environ` exposes. `read_secret_dir` reads a whole secrets directory for values that aren't settings.
 - Nothing is logged. `Resolved.sources` says where each value came from, and is safe to show.
 

@@ -17,7 +17,7 @@ CI runs the unit tests on every supported Python version, together with ruff, my
 | `tests/unit/` | Fast and offline: no network, no real external systems. Most tests. |
 | `tests/integration/` | Real dependencies, marked `@pytest.mark.integration`; skipped unless `RUN_INTEGRATION=1` |
 
-| `tests/unit/test_settings.py` | Declarations, the lookup order and sources, coercion of each type from YAML, the environment and `_FILE`, the checks, secret settings |
+| `tests/unit/test_settings.py` | Declarations, the lookup order and sources, coercion of each type from YAML, the environment and `_FILE`, the checks and their replacements (`one_of`'s declared spelling), secret settings, the typed accessors |
 | `tests/unit/test_secret.py` | `Secret` masking (str, repr, f-strings, logging, exceptions) and `read_secret_dir` |
 | `tests/unit/test_pipeline.py` | The guard (timing, timeouts and late results, failures, answers, `valid`), each phase, every `Policy` field (`skip_inherited` with instance hooks and state-based stops), the cached `active`, and both consumers' semantics rebuilt on it (mitm-proxy fail-open, sluice onion and fail-closed) |
 | `tests/unit/test_metrics.py` | Label sets enforced on every call, declaration checks, the text format, and parity with mitm-proxy's `/metrics` lines |

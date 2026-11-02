@@ -25,8 +25,6 @@ A project's `config.py` declares its settings and turns the resolved values into
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import cast
-
 from interpose.secret import Secret
 from interpose.settings import ConfigError, Setting, Settings, one_of, port
 
@@ -59,12 +57,12 @@ class Config:
 def load_config(path: Path | None = None, environ: Mapping[str, str] | None = None) -> Config:
     r = SETTINGS.resolve(path, environ)
     # Rules that span settings go here, raising ConfigError.
-    # Each value has its setting's type, so cast() only tells mypy what resolve() guarantees.
+    # Each accessor checks the setting's kind: r.str() on a secret setting is a TypeError.
     return Config(
-        log_level=cast(str, r.values["log_level"]).upper(),
-        port=cast(int, r.values["listen.port"]),
-        token=cast(Secret, r.values["upstream.token"]),  # never str(): that gives "********"
-        hosts=cast(tuple[str, ...], r.values["allow.hosts"]),
+        log_level=r.str("log_level"),  # one_of gives the declared spelling: "debug" -> "DEBUG"
+        port=r.int("listen.port"),
+        token=r.secret("upstream.token"),  # reveal() at the point of use
+        hosts=r.list("allow.hosts"),
         sources=dict(r.sources),
     )
 ```
