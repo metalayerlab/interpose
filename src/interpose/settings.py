@@ -15,9 +15,10 @@ The type comes from the default, and coercion is strict: a value that isn't the 
 `ConfigError`, never a silent conversion. Values are never logged, and an error never contains a
 secret setting's value. Nothing here does I/O until `Settings.resolve()` is called.
 
-An unknown key in a layer, or a prefixed variable no setting reads, is still ignored, and gives a
-`ConfigWarning` on `Resolved.warnings` for the project to log (design 0009). interpose itself never
-logs, prints or raises one.
+A setting may keep old names (`aliases`), read in each of those places alongside its key, each
+with a warning (design 0009). An unknown key in a layer, or a prefixed variable no setting reads, is
+still ignored, and gives a `ConfigWarning` on `Resolved.warnings` for the project to log. interpose
+itself never logs, prints or raises one.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ import datetime
 import difflib
 import os
 import re
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence, Set
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
@@ -71,9 +72,10 @@ class ConfigError(Exception):
 class ConfigWarning:
     """Something in the configuration that resolution ignored, for the project to log (design 0009).
 
-    `kind` is `"unknown"` for a key or prefixed variable no setting reads (`"alias"` and `"ignored"`
-    are reserved for later steps). `name` is the key or variable it is about (`"listen.prot"`,
-    `"SLUICE_LISTEN_PROT"`); `message` is one line naming keys, variables and where, never a value.
+    `kind` is `"unknown"` for a key or prefixed variable no setting reads, or `"alias"` for a
+    setting's old name that is set, used or not (`"ignored"` is reserved for a later step). `name`
+    is the key or variable it is about (`"listen.prot"`, `"SLUICE_PORT"`); `message` is one line
+    naming keys, variables and where, never a value.
     """
 
     kind: Literal["unknown", "alias", "ignored"]
@@ -92,6 +94,10 @@ class Setting:
     wrapped in `Secret`) and raises `ValueError` with a reason. It may return a replacement of the
     setting's type (`one_of` returns the declared spelling); `None` keeps the value. A secret
     setting's value can't be replaced (design 0007).
+
+    `aliases` are the setting's old dotted keys, read wherever its key is (design 0009): the key in
+    every layer, `<PREFIX><ALIAS>` and `<PREFIX><ALIAS>_FILE`. Each one that is set gives an `alias`
+    warning.
     """
 
     key: str
@@ -101,10 +107,16 @@ class Setting:
     is_list: bool = False
     check: Callable[[Value], Value | None] | None = None
     prefix: str = ""
+    aliases: tuple[str, ...] = ()
 
     @property
     def env(self) -> str:
-        return self.prefix + self.key.upper().replace(".", "_")
+        return _env_name(self.prefix, self.key)
+
+
+def _env_name(prefix: str, key: str) -> str:
+    """The variable a dotted key is read from: `listen.port` is `<PREFIX>LISTEN_PORT`."""
+    return prefix + key.upper().replace(".", "_")
 
 
 @dataclass(frozen=True)
@@ -129,9 +141,10 @@ class Resolved:
     """Typed values and where each came from, both keyed by setting key, in declaration order.
 
     `values` holds `Secret` for secret settings and a tuple for list settings. `sources` holds the
-    `_FILE` variable's name, the environment variable's name, `"file"` (or the `source` of the
-    `Layer` the value came from) or `"default"`. `warnings` holds a `ConfigWarning` for each unknown
-    key and prefixed variable, in the order found: layers first, in order, then variables by name.
+    `_FILE` variable's name, the environment variable's name (an alias's, when that is what was
+    read), `"file"` (or the `source` of the `Layer` the value came from) or `"default"`. `warnings`
+    holds a `ConfigWarning` for each unknown key and prefixed variable and each alias that is set,
+    in the order found: layers first, in order, then variables by name.
 
     The typed accessors (`str`, `int`, `bool`, `list`, `secret`) give a value with its type, and
     raise `TypeError` naming the key when the setting is another kind (`str()` on a secret
@@ -219,7 +232,7 @@ class Settings(Sequence[Setting]):
                     # pyyaml loads `on`, `no`, `null` or `1` as a bool, None or int key, so
                     # the file's value would never be found under the string.
                     raise ValueError(f"{setting.key!r}: YAML doesn't read {part!r} as a string")
-            env = prefix + setting.key.upper().replace(".", "_")
+            env = _env_name(prefix, setting.key)
             for name in (env, env + "_FILE"):
                 if name in names:
                     raise ValueError(f"{setting.key!r}: {name} is also {names[name]}")
@@ -231,6 +244,20 @@ class Settings(Sequence[Setting]):
                 raise ValueError(f"{setting.key!r}: a secret setting must be a str setting")
             seen.add(setting.key)
             bound.append(replace(setting, prefix=prefix))
+        # Aliases once every key is known: an alias may equal no key, declared before or after.
+        alias_of: dict[str, str] = {}  # alias -> its setting's key
+        alias_env: dict[str, str] = {}  # an alias's variable -> the key's ("_FILE" for "_FILE")
+        for setting in bound:
+            for alias in self._check_aliases(setting, seen, alias_of):
+                alias_of[alias] = setting.key
+                env = _env_name(prefix, alias)
+                for name, current in ((env, setting.env), (env + "_FILE", setting.env + "_FILE")):
+                    if name in names:
+                        raise ValueError(
+                            f"{setting.key!r}: alias {alias!r}: {name} is also {names[name]}"
+                        )
+                    names[name] = f"read by {setting.key!r} (its alias {alias!r})"
+                    alias_env[name] = current
         if isinstance(extra_env, str):
             raise ValueError("extra_env: a tuple of variable names, not one str")
         extra: list[str] = []
@@ -247,18 +274,57 @@ class Settings(Sequence[Setting]):
         self.config_env = prefix + "CONFIG"
         self.extra_env = tuple(extra)
         self._settings = tuple(bound)
-        # The names the unknown-key and unknown-variable checks accept (design 0009, section 2).
-        # Later steps add to these sets: aliases (step 3) add their keys, parents and variables;
-        # sections (step 5) add their keys to `_leaf_keys`, so nothing below one is checked; list
-        # sections with fields (step 6) add their indexed variables and check items' fields.
-        # Suggestions come from current names only, never aliases.
-        self._leaf_keys = frozenset(seen)
-        self._known_keys = frozenset(
-            ".".join(parts[:end])
-            for parts in (key.split(".") for key in seen)
-            for end in range(1, len(parts) + 1)
-        )
+        # The names the unknown-key and unknown-variable checks accept (design 0009, section 2):
+        # every key and alias, their parents, and every variable a setting or alias reads. Later
+        # steps add to these: sections (step 5) add their keys to `_leaf_keys`, so nothing below one
+        # is checked; list sections with fields (step 6) add their indexed variables (an alias's
+        # too) and check items' fields. Suggestions come from current names only, never aliases.
+        self._alias_of = MappingProxyType(alias_of)
+        self._alias_env = MappingProxyType(alias_env)
+        self._leaf_keys = frozenset(seen) | frozenset(alias_of)
+        self._known_keys = _with_parents(self._leaf_keys)
+        self._suggest_keys = _with_parents(seen)
         self._known_env = frozenset(names) | frozenset(extra)
+        self._suggest_env = self._known_env - frozenset(alias_env)
+
+    @staticmethod
+    def _check_aliases(
+        setting: Setting, keys: Set[str], aliases: Mapping[str, str]
+    ) -> tuple[str, ...]:
+        """A setting's aliases, each well-formed and clashing with no key, no other alias of its
+        own and no alias of an earlier setting (`aliases`). Raises `ValueError` as for a key."""
+        if not isinstance(setting.aliases, tuple):
+            raise ValueError(f"{setting.key!r}: aliases are a tuple of dotted keys")
+        own: list[str] = []
+        for alias in setting.aliases:
+            if not isinstance(alias, str) or not _KEY.fullmatch(alias):
+                raise ValueError(
+                    f"{setting.key!r}: alias {alias!r}: a key is lower-case words of [a-z0-9_] "
+                    "joined by dots"
+                )
+            for part in alias.split("."):
+                if not _is_yaml_str(part):
+                    raise ValueError(
+                        f"{setting.key!r}: alias {alias!r}: YAML doesn't read {part!r} as a string"
+                    )
+            if alias in keys:
+                raise ValueError(f"{setting.key!r}: alias {alias!r} is a setting's key")
+            if alias in own:
+                raise ValueError(f"{setting.key!r}: alias {alias!r} named twice")
+            if alias in aliases:
+                raise ValueError(
+                    f"{setting.key!r}: alias {alias!r} is already an alias of {aliases[alias]!r}"
+                )
+            # A YAML path can't be both a value and a mapping: with `listen` an alias and
+            # `listen.port` a key, every file that sets `listen.port` would set `listen` too.
+            for other in sorted(keys | set(aliases) | set(own)):
+                if other.startswith(alias + ".") or alias.startswith(other + "."):
+                    raise ValueError(
+                        f"{setting.key!r}: alias {alias!r} and {other!r}: "
+                        "one is a parent of the other"
+                    )
+            own.append(alias)
+        return tuple(own)
 
     @overload
     def __getitem__(self, index: int) -> Setting: ...
@@ -316,19 +382,20 @@ class Settings(Sequence[Setting]):
         sources: dict[str, str] = {}
         for setting in self._settings:
             values[setting.key], sources[setting.key] = _resolve_one(setting, layers, env)
-        warnings = [w for layer in layers for w in self._unknown_keys(layer)]
-        warnings += self._unknown_env(env)
+        warnings = [w for layer in layers for w in self._layer_warnings(layer)]
+        warnings += self._env_warnings(env)
         return Resolved(
             values=MappingProxyType(values),
             sources=MappingProxyType(sources),
             warnings=tuple(warnings),
         )
 
-    def _unknown_keys(
+    def _layer_warnings(
         self, layer: Layer, node: Mapping[Any, Any] | None = None, parent: str = ""
     ) -> Iterator[ConfigWarning]:
-        """An `unknown` warning for each path in the layer that is neither a key nor a parent of
-        one, at its first unknown level, in document order. Never a value."""
+        """In document order, an `unknown` warning for each path in the layer that is neither a key
+        or alias nor a parent of one, at its first unknown level, and an `alias` warning for each
+        alias that is set (as `_lookup` sees it: present and not null). Never a value."""
         for part, child in (layer.data if node is None else node).items():
             # A non-string key (`on:` loads as True) is named by its YAML text.
             text = part if isinstance(part, str) else _yaml_text(part)
@@ -338,24 +405,36 @@ class Settings(Sequence[Setting]):
             if not isinstance(part, str) or "." in part or path not in self._known_keys:
                 where = layer.origins.get(path, layer.where)
                 message = f"unknown key {path!r} in {where}"
-                # Suggest a key or parent at the same depth: `listne` gets `listen`, and
-                # `listen.1` never gets its own parent `listen`.
+                # Suggest a current key or parent at the same depth: `listne` gets `listen`, and
+                # `listen.1` never gets its own parent `listen`. Never an alias.
                 depth = path.count(".")
-                peers = (k for k in self._known_keys if k.count(".") == depth)
+                peers = (k for k in self._suggest_keys if k.count(".") == depth)
                 yield ConfigWarning("unknown", path, message + _did_you_mean(path, peers))
+            elif path in self._alias_of:
+                if child is not None:  # a null alias is unset, as for a key
+                    where = layer.origins.get(path, layer.where)
+                    yield _alias_warning(path, where, self._alias_of[path])
             elif path not in self._leaf_keys and isinstance(child, Mapping):
-                yield from self._unknown_keys(layer, child, path)
+                yield from self._layer_warnings(layer, child, path)
 
-    def _unknown_env(self, environ: Mapping[str, str]) -> Iterator[ConfigWarning]:
-        """An `unknown` warning for each prefixed variable no setting reads, by name. Only names
-        are read, never values. With no prefix, every variable would be "prefixed": none is
-        checked."""
-        if not self.prefix:
-            return
+    def _env_warnings(self, environ: Mapping[str, str]) -> Iterator[ConfigWarning]:
+        """By name, an `alias` warning for each alias variable that is set, and an `unknown` warning
+        for each prefixed variable no setting reads. Only names are read, never values. With no
+        prefix, every variable would be "prefixed": none is reported unknown, though aliases are."""
         for name in sorted(n for n in environ if n.startswith(self.prefix)):
-            if name not in self._known_env:
+            if name in self._alias_env:
+                yield _alias_warning(name, "the environment", self._alias_env[name])
+            elif self.prefix and name not in self._known_env:
                 message = f"unknown variable {name!r} in the environment"
-                yield ConfigWarning("unknown", name, message + _did_you_mean(name, self._known_env))
+                yield ConfigWarning(
+                    "unknown", name, message + _did_you_mean(name, self._suggest_env)
+                )
+
+
+def _alias_warning(old: str, where: str, current: str) -> ConfigWarning:
+    """`'port' (in /etc/sluice/config.yaml) is the old name of 'listen.port': rename it`."""
+    message = f"{old!r} (in {where}) is the old name of {current!r}: rename it"
+    return ConfigWarning("alias", old, message)
 
 
 def _read_yaml(path: Path) -> Mapping[str, Any]:
@@ -391,6 +470,15 @@ def _yaml_text(key: object) -> str:
         return repr(key)
 
 
+def _with_parents(keys: Iterable[str]) -> frozenset[str]:
+    """The keys and every parent of each: `listen.port` gives `listen` and `listen.port`."""
+    return frozenset(
+        ".".join(parts[:end])
+        for parts in (key.split(".") for key in keys)
+        for end in range(1, len(parts) + 1)
+    )
+
+
 def _did_you_mean(name: str, known: Iterable[str]) -> str:
     """`: did you mean '<closest>'?` for the closest known name, or nothing (design 0009)."""
     close = difflib.get_close_matches(name, sorted(known), n=1, cutoff=0.75)
@@ -413,34 +501,69 @@ def _lookup(data: Mapping[str, Any], dotted: str) -> Any:
     return node
 
 
+@dataclass(frozen=True)
+class _Found:
+    """A value one of a setting's names has at one level of the order, before coercion."""
+
+    raw: Any
+    source: str  # what `sources` says: a variable's name, a layer's `source`, "default"
+    where: str | None  # for a layer's value, where errors say it came from; else None
+    name: str  # what a same-level conflict names: the variable, or the key or alias
+
+    @property
+    def origin(self) -> str:
+        """What a coercion error names: `where` for a layer's value, else `source`."""
+        return self.source if self.where is None else self.where
+
+
+def _found(setting: Setting, layers: Sequence[Layer], environ: Mapping[str, str]) -> list[_Found]:
+    """What the setting's key and aliases hold at the first level of the order where any is set:
+    `_FILE`, then the variable, then each layer; else the default. The key comes first, then the
+    aliases in declaration order. (A list section's indexed variables, step 6, are one more level
+    the aliases share.)"""
+    names = (setting.key, *setting.aliases)
+    variables = [_env_name(setting.prefix, name) for name in names]
+    files = [f"{var}_FILE" for var in variables if f"{var}_FILE" in environ]
+    if files:
+        return [_Found(_read_file_variable(var, environ), var, None, var) for var in files]
+    if set_vars := [var for var in variables if var in environ]:
+        return [_Found(environ[var], var, None, var) for var in set_vars]
+    for layer in layers:
+        found = [
+            _Found(raw, layer.source, layer.origins.get(name, layer.where), name)
+            for name in names
+            if (raw := _lookup(layer.data, name)) is not None
+        ]
+        if found:
+            return found
+    return [_Found(setting.default, "default", None, setting.key)]
+
+
+def _read_file_variable(file_var: str, environ: Mapping[str, str]) -> str:
+    path = Path(environ[file_var])
+    try:
+        return path.read_text(encoding="utf-8").rstrip()
+    except OSError as e:
+        raise ConfigError(f"cannot read {file_var} ({path}): {e.strerror}") from None
+    except UnicodeDecodeError:
+        raise ConfigError(f"cannot read {file_var} ({path}): not UTF-8") from None
+
+
 def _resolve_one(
     setting: Setting, layers: Sequence[Layer], environ: Mapping[str, str]
 ) -> tuple[Value, str]:
-    file_var = f"{setting.env}_FILE"
-    raw: Any
-    # For a value from a layer, where an error says it came from: the key's origin, else the
-    # layer's `where`. None for a variable or the default: a coercion error names `source`.
-    where: str | None = None
-    if file_var in environ:
-        path = Path(environ[file_var])
-        try:
-            raw = path.read_text(encoding="utf-8").rstrip()
-        except OSError as e:
-            raise ConfigError(f"cannot read {file_var} ({path}): {e.strerror}") from None
-        except UnicodeDecodeError:
-            raise ConfigError(f"cannot read {file_var} ({path}): not UTF-8") from None
-        source = file_var
-    elif setting.env in environ:
-        raw, source = environ[setting.env], setting.env
-    else:
-        raw, source = setting.default, "default"
-        for layer in layers:
-            found = _lookup(layer.data, setting.key)
-            if found is not None:
-                raw, source = found, layer.source
-                where = layer.origins.get(setting.key, layer.where)
-                break
-    value = _coerce(setting, raw, source if where is None else where)
+    first, *others = _found(setting, layers, environ)
+    source, where = first.source, first.where
+    value = _coerce(setting, first.raw, first.origin)
+    for other in others:
+        # The key and an alias (or two aliases) set at one level must agree once typed: neither
+        # can quietly win. The message names both, never either value.
+        if _coerce(setting, other.raw, other.origin) != value:
+            place = "the environment" if other.where is None else other.where
+            raise ConfigError(
+                f"{setting.key}: set as both {first.name!r} and its old name {other.name!r} "
+                f"(from {place}), to different values"
+            )
     if setting.check is not None:
         try:
             replacement = setting.check(value)
