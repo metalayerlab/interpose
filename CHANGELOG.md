@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.3](https://github.com/metalayerlab/interpose/compare/v0.3.2...v0.3.3) (2026-11-04)
+
+
+### ✨ Features
+
+* **settings:** opt-in ${VAR} expansion in config files (design 0009 step 4) ([#44](https://github.com/metalayerlab/interpose/issues/44)) ([01456a4](https://github.com/metalayerlab/interpose/commit/01456a4b300f415ac48cffa818209d130ec6af0d)), closes [#32](https://github.com/metalayerlab/interpose/issues/32)
+
 ## [0.3.2](https://github.com/metalayerlab/interpose/compare/v0.3.1...v0.3.2) (2026-11-04)
 
 
