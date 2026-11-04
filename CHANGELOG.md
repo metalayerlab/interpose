@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.0](https://github.com/metalayerlab/interpose/compare/v0.3.3...v0.4.0) (2026-11-04)
+
+
+### ⚠ BREAKING CHANGES
+
+* **settings:** Value gains Section and tuple[Section, ...], so an exhaustive match on Value needs two more cases.
+
+### ✨ Features
+
+* **settings:** section settings with secret leaves (design 0009 step 5) ([#46](https://github.com/metalayerlab/interpose/issues/46)) ([1279ede](https://github.com/metalayerlab/interpose/commit/1279edebe843bea2741e26c37ae7bf3360cd8bfe)), closes [#35](https://github.com/metalayerlab/interpose/issues/35)
+
 ## [0.3.3](https://github.com/metalayerlab/interpose/compare/v0.3.2...v0.3.3) (2026-11-04)
 
 
