@@ -46,6 +46,14 @@ A key spelled wrongly, or nested under the wrong parent, is ignored too, and giv
 
 The project reads that prefixed variable itself, outside its settings. Name it in `Settings(..., extra_env=("MYAPP_...",))`.
 
+### "'port' (in /etc/myapp/config.yaml) is the old name of 'listen.port': rename it"
+
+The setting was renamed, and the configuration still uses its old name. The old name still works, but a later major release of the project may drop it: rename the key in the file, or the variable (`'MYAPP_PORT' (in the environment) is the old name of 'MYAPP_LISTEN_PORT'`). The warning comes whether the old name's value was used or shadowed by a higher level of the lookup order.
+
+### "listen.port: set as both 'listen.port' and its old name 'port' (from ...), to different values"
+
+The same setting is given under its current name and its old name at the same level (both in one file, or both as variables), with different values, so neither can be trusted to win. Remove the old name. Equal values are accepted, with the warning above.
+
 ### A secret shows as `********` where its value is needed
 
 The code called `str()` on the `Secret`. Call `reveal()` at the point of use.

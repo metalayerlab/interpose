@@ -74,7 +74,7 @@ async def handle(ctx):
 
 ### `interpose.settings`
 
-**`Setting(key, default, help, *, secret=False, is_list=False, check=None)`**: one setting, a frozen dataclass.
+**`Setting(key, default, help, *, secret=False, is_list=False, check=None, aliases=())`**: one setting, a frozen dataclass.
 
 - `key`: dotted lower case, `[a-z0-9_]+` joined by dots (`listen.port`).
 - `default`: a `str`, `int` or `bool`. Its type is the setting's type. A list setting's default is `""`.
@@ -82,13 +82,14 @@ async def handle(ctx):
 - `secret`: the value resolves to a `Secret`. Only for str settings.
 - `is_list`: the value is a `tuple[str, ...]`, from a YAML list or a comma-separated string.
 - `check`: a callable that gets the coerced value and raises `ValueError(reason)` if it's invalid. It may return a replacement of the setting's kind (a `str`, an `int` that isn't a `bool`, a `bool`, a `tuple` of `str`); `None` keeps the value. Returning the value unchanged keeps it. A replacement of another kind is a `ConfigError` naming the key and the type, never the value. A check on a secret setting must return `None` (or the value unchanged).
+- `aliases`: a tuple of old dotted keys for a renamed setting (`aliases=("port",)` on `listen.port`). Each is read wherever the key is: in every layer, as `<PREFIX><ALIAS>` and as `<PREFIX><ALIAS>_FILE`. At each level of the lookup order the key and its aliases are looked up together: if one is set it is used; if several are, their coerced values must be equal (the key's is the one read), or it is a `ConfigError` naming both, never the values. A higher level beats a lower one whatever the name. Each alias that is set gives an `alias` warning, used or not. Public, so a `config` command or wiki table can show "formerly `port`" ([0009](https://github.com/metalayerlab/interpose/blob/main/docs/design/0009-settings-extensions.md)).
 - `env` (property): the environment variable, the prefix plus the upper-cased key with dots as underscores (`MYAPP_LISTEN_PORT`). `prefix` is set by `Settings`, never by hand.
 
 **`Settings(prefix, settings, *, default_path, extra_env=())`**: a `Sequence[Setting]`, each one bound to `prefix`.
 
 - `config_env`: `prefix + "CONFIG"`, the variable that names the YAML file. Also `prefix`, `default_path` and `extra_env`.
 - `extra_env`: names of prefixed variables the project reads itself (`("MYAPP_DEBUG_DUMP",)`), so they give no unknown-variable warning. Each must start with the prefix, appear once, and not be a variable a setting already reads (or `<PREFIX>CONFIG`).
-- Raises `ValueError` for a bad or duplicate key, a key part YAML doesn't read as a string (`on`, `no`, `null`, `1`), two settings that would read the same variable (`a.b` and `a_b`; `x_file` and `x`'s `_FILE`; a key `config`), a list setting whose default isn't `""`, a secret setting that isn't a str setting, or an `extra_env` name that breaks its rules.
+- Raises `ValueError` for a bad or duplicate key, a key part YAML doesn't read as a string (`on`, `no`, `null`, `1`), two settings that would read the same variable (`a.b` and `a_b`; `x_file` and `x`'s `_FILE`; a key `config`), an alias that is malformed, isn't a tuple, repeats (in its setting or another), equals a key, is a parent of a key or alias or below one, or reads a variable another setting or alias reads, a list setting whose default isn't `""`, a secret setting that isn't a str setting, or an `extra_env` name that breaks its rules.
 - **`resolve(path=None, environ=None, *, layers=None) -> Resolved`**: reads `path` (else `$<PREFIX>CONFIG`, else `default_path`; missing means defaults) and `environ` (else `os.environ`), and resolves every setting. Raises `ConfigError`.
   - **`layers`**, a sequence of `Layer`, replaces the file: no file is read, and each setting takes the first of its `_FILE` variable, its variable, `layers[0]`, `layers[1]`, ..., its default. `layers=[]` means the environment and defaults only. Passing `path` with `layers` is a `ValueError`. Without `layers`, `resolve(path, environ)` is `resolve(environ=environ, layers=[read_file(path, environ)])` ([0009](https://github.com/metalayerlab/interpose/blob/main/docs/design/0009-settings-extensions.md)).
 - **`read_file(path=None, environ=None) -> Layer`**: the config file as a `Layer` with source `"file"` and `where` its path, found as `resolve()` finds it. A missing file is an empty layer; an unreadable or invalid one is the same `ConfigError` `resolve()` gives.
@@ -115,8 +116,8 @@ r.sources["listen.port"]  # "control plane"
 **`Resolved(values, sources, warnings=())`**: frozen, read-only mappings keyed by setting key, in declaration order, and the warnings.
 
 - `values[key]`: the typed value, a `Value` (`str | int | bool | tuple[str, ...] | Secret`).
-- `sources[key]`: `"<PREFIX><KEY>_FILE"`, `"<PREFIX><KEY>"`, `"file"` (or, with `layers`, the layer's `source`) or `"default"`.
-- `warnings`: a tuple of `ConfigWarning`, in the order found: each layer's unknown keys in document order, then unknown prefixed variables by name. Empty for a clean configuration. interpose never logs, prints or raises them: log each at WARNING on startup and on every reload, or raise if you want strictness ([0009](https://github.com/metalayerlab/interpose/blob/main/docs/design/0009-settings-extensions.md)).
+- `sources[key]`: `"<PREFIX><KEY>_FILE"`, `"<PREFIX><KEY>"`, `"file"` (or, with `layers`, the layer's `source`) or `"default"`. For a value read under an alias, the alias's variable (`"MYAPP_PORT"`, `"MYAPP_PORT_FILE"`), or the layer's `source`.
+- `warnings`: a tuple of `ConfigWarning`, in the order found: each layer's unknown keys and set aliases in document order, then unknown prefixed variables and set alias variables by name. Empty for a clean configuration. interpose never logs, prints or raises them: log each at WARNING on startup and on every reload, or raise if you want strictness ([0009](https://github.com/metalayerlab/interpose/blob/main/docs/design/0009-settings-extensions.md)).
 - **Typed accessors** `str(key)`, `int(key)` (never a `bool`), `bool(key)`, `list(key)` (a `tuple[str, ...]`) and `secret(key)` (a `Secret`) give a value with its type instead of a `cast()`. Each raises `TypeError` naming the key when the setting is another kind; on a secret setting, every one but `secret()` does, so a masked `"********"` can't reach a credential. A key that isn't declared is a `KeyError`.
 
 ```python
@@ -129,9 +130,9 @@ r.str("upstream.token")
 
 **`ConfigWarning(kind, name, message)`**: something resolution ignored, a frozen dataclass; `str()` gives `message`.
 
-- `kind`: `"unknown"` for a key in a layer that is neither a setting's key nor a parent of one, or a variable that starts with the prefix but that no setting reads (its variable, its `_FILE`, `<PREFIX>CONFIG`, `extra_env`). `"alias"` and `"ignored"` are reserved for later releases.
-- `name`: the key (dotted, at its first unknown level: `listne`, not each key below it; a non-string YAML key by its YAML text, `true` for `on:`) or the variable.
-- `message`: one line naming the key or variable and where, with the closest current name when one is close enough (`difflib`, cutoff 0.75), never a value: `unknown key 'listen.prot' in /etc/myapp/config.yaml: did you mean 'listen.port'?`, `unknown variable 'MYAPP_LISTEN_PROT' in the environment: did you mean 'MYAPP_LISTEN_PORT'?`. For a layer, where is `origins[key]` when present, else its `where`.
+- `kind`: `"unknown"` for a key in a layer that is neither a setting's key nor a parent of one, or a variable that starts with the prefix but that no setting reads (its variable, its `_FILE`, `<PREFIX>CONFIG`, `extra_env`, an alias's variables). `"alias"` for an alias that is set, in a layer or as a variable, whether its value was used or shadowed by a higher level. `"ignored"` is reserved for a later release.
+- `name`: the key (dotted, at its first unknown level: `listne`, not each key below it; a non-string YAML key by its YAML text, `true` for `on:`) or the variable; for an alias, the alias or its variable.
+- `message`: one line naming the key or variable and where, with the closest current name when one is close enough (`difflib`, cutoff 0.75), never a value: `unknown key 'listen.prot' in /etc/myapp/config.yaml: did you mean 'listen.port'?`, `unknown variable 'MYAPP_LISTEN_PROT' in the environment: did you mean 'MYAPP_LISTEN_PORT'?`. For a layer, where is `origins[key]` when present, else its `where`. An alias warning names the old name and the current one: `'port' (in /etc/myapp/config.yaml) is the old name of 'listen.port': rename it`, `'MYAPP_PORT' (in the environment) is the old name of 'MYAPP_LISTEN_PORT': rename it`. Suggestions never offer an alias.
 
 **`ConfigError`**: the configuration can't be read, or a value in it is invalid. The message names the key, the expected type and where the value came from (the variable, `default`, or for a value from the file or a layer its path or `where`: `listen.port: expected int, got 'x' (from /etc/myapp/config.yaml)`), and never holds a secret setting's value.
 

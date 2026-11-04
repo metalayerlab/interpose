@@ -1289,3 +1289,341 @@ class TestTypedAccessors:
     def test_a_missing_key_is_a_key_error(self, accessor: str) -> None:
         with pytest.raises(KeyError):
             getattr(self.resolved(), accessor)("nope")
+
+
+# --- aliases (design 0009, step 3) ---------------------------------------------------------------
+
+OLD_PORT = Setting("listen.port", 8080, "Port.", aliases=("port",))
+
+
+def alias_warning(old: str, where: str, current: str) -> ConfigWarning:
+    return ConfigWarning(
+        "alias", old, f"{old!r} (in {where}) is the old name of {current!r}: rename it"
+    )
+
+
+class TestAliasLookup:
+    def test_alias_in_the_config_file(self, tmp_path: Path) -> None:
+        r = resolve_yaml(tmp_path, "port: 9000\n", OLD_PORT)
+        assert r.values["listen.port"] == 9000
+        assert r.sources["listen.port"] == "file"
+        path = tmp_path / "config.yaml"
+        assert r.warnings == (alias_warning("port", str(path), "listen.port"),)
+        assert make(OLD_PORT)[0].aliases == ("port",)  # public, for a project's `config` command
+
+    def test_dotted_alias_in_a_layer(self) -> None:
+        moved = Setting("server.listen.port", 8080, "", aliases=("old.port", "port"))
+        r = make(moved).resolve(environ={}, layers=[layer({"old": {"port": 1}})])
+        assert (r.values["server.listen.port"], r.sources["server.listen.port"]) == (1, "file")
+        assert r.warnings == (alias_warning("old.port", ETC, "server.listen.port"),)
+
+    def test_alias_variable(self) -> None:
+        r = make(OLD_PORT).resolve(environ={"APP_PORT": "9000"}, layers=[])
+        assert (r.values["listen.port"], r.sources["listen.port"]) == (9000, "APP_PORT")
+        assert r.warnings == (alias_warning("APP_PORT", "the environment", "APP_LISTEN_PORT"),)
+
+    def test_alias_file_variable(self, tmp_path: Path) -> None:
+        (tmp_path / "port").write_text("9000\n", encoding="utf-8")
+        environ = {"APP_PORT_FILE": str(tmp_path / "port")}
+        r = make(OLD_PORT).resolve(environ=environ, layers=[])
+        assert (r.values["listen.port"], r.sources["listen.port"]) == (9000, "APP_PORT_FILE")
+        assert r.warnings == (
+            alias_warning("APP_PORT_FILE", "the environment", "APP_LISTEN_PORT_FILE"),
+        )
+
+    def test_an_unreadable_alias_file_variable_names_it(self, tmp_path: Path) -> None:
+        environ = {"APP_PORT_FILE": str(tmp_path / "missing")}
+        with pytest.raises(ConfigError, match=r"^cannot read APP_PORT_FILE \("):
+            make(OLD_PORT).resolve(environ=environ, layers=[])
+
+    def test_a_list_setting_alias(self) -> None:
+        hosts = Setting("allow.hosts", "", "", is_list=True, aliases=("hosts",))
+        r = make(hosts).resolve(environ={"APP_HOSTS": "a, b"}, layers=[layer({"hosts": ["c"]})])
+        assert r.values["allow.hosts"] == ("a", "b")
+
+    def test_a_null_alias_is_unset(self) -> None:
+        r = make(OLD_PORT).resolve(
+            environ={}, layers=[layer({"port": None}), layer({"port": 2}, where="/lower.yaml")]
+        )
+        assert r.values["listen.port"] == 2
+        assert r.warnings == (alias_warning("port", "/lower.yaml", "listen.port"),)
+
+
+class TestAliasSameLevel:
+    def test_equal_values_in_a_layer_the_key_is_read(self) -> None:
+        # Equal once typed: the int 9000 and the string "9000".
+        data = {"listen": {"port": 9000}, "port": "9000"}
+        r = make(OLD_PORT).resolve(environ={}, layers=[layer(data)])
+        assert (r.values["listen.port"], r.sources["listen.port"]) == (9000, "file")
+        assert r.warnings == (alias_warning("port", ETC, "listen.port"),)
+
+    def test_equal_values_in_variables_the_key_is_read(self, tmp_path: Path) -> None:
+        r = make(OLD_PORT).resolve(environ={"APP_LISTEN_PORT": "9000", "APP_PORT": " 9000"})
+        assert (r.values["listen.port"], r.sources["listen.port"]) == (9000, "APP_LISTEN_PORT")
+        assert r.warnings == (alias_warning("APP_PORT", "the environment", "APP_LISTEN_PORT"),)
+        (tmp_path / "a").write_text("9000\n", encoding="utf-8")
+        (tmp_path / "b").write_text("9000", encoding="utf-8")
+        environ = {
+            "APP_LISTEN_PORT_FILE": str(tmp_path / "a"),
+            "APP_PORT_FILE": str(tmp_path / "b"),
+        }
+        r = make(OLD_PORT).resolve(environ=environ, layers=[])
+        assert r.sources["listen.port"] == "APP_LISTEN_PORT_FILE"
+        assert [(w.kind, w.name) for w in r.warnings] == [("alias", "APP_PORT_FILE")]
+
+    def test_different_values_in_a_layer_are_an_error(self) -> None:
+        data = {"listen": {"port": 9000}, "port": 9001}
+        with pytest.raises(ConfigError) as e:
+            make(OLD_PORT).resolve(environ={}, layers=[layer(data)])
+        assert str(e.value) == (
+            f"listen.port: set as both 'listen.port' and its old name 'port' (from {ETC}), "
+            "to different values"
+        )
+        assert "9000" not in str(e.value) and "9001" not in str(e.value)
+
+    def test_the_conflict_names_the_aliass_origin(self) -> None:
+        data = {"listen": {"port": 1}, "port": 2}
+        payload = layer(data, where="control plane", origins={"port": "payload.port"})
+        with pytest.raises(ConfigError, match=r"old name 'port' \(from payload\.port\), to diff"):
+            make(OLD_PORT).resolve(environ={}, layers=[payload])
+
+    def test_different_values_in_variables_are_an_error(self, tmp_path: Path) -> None:
+        with pytest.raises(ConfigError) as e:
+            make(OLD_PORT).resolve(environ={"APP_LISTEN_PORT": "1", "APP_PORT": "2"}, layers=[])
+        assert str(e.value) == (
+            "listen.port: set as both 'APP_LISTEN_PORT' and its old name 'APP_PORT' "
+            "(from the environment), to different values"
+        )
+        (tmp_path / "a").write_text("1", encoding="utf-8")
+        (tmp_path / "b").write_text("2", encoding="utf-8")
+        environ = {
+            "APP_LISTEN_PORT_FILE": str(tmp_path / "a"),
+            "APP_PORT_FILE": str(tmp_path / "b"),
+        }
+        with pytest.raises(
+            ConfigError, match="'APP_LISTEN_PORT_FILE' and its old name 'APP_PORT_FILE'"
+        ):
+            make(OLD_PORT).resolve(environ=environ, layers=[])
+
+    def test_two_aliases_that_differ_name_each_other(self) -> None:
+        twice = Setting("listen.port", 8080, "", aliases=("port", "bind_port"))
+        with pytest.raises(ConfigError, match="both 'port' and its old name 'bind_port'"):
+            make(twice).resolve(environ={}, layers=[layer({"port": 1, "bind_port": 2})])
+
+    def test_an_aliass_coercion_error_names_its_source(self) -> None:
+        with pytest.raises(
+            ConfigError, match=r"^listen\.port: expected int, got 'x' \(from APP_PORT\)$"
+        ):
+            make(OLD_PORT).resolve(environ={"APP_PORT": "x"}, layers=[])
+        with pytest.raises(ConfigError, match=rf"expected int, got 'x' \(from {ETC}\)$"):
+            make(OLD_PORT).resolve(environ={}, layers=[layer({"listen": {"port": 1}, "port": "x"})])
+        payload = layer({"port": "x"}, origins={"port": "payload.port"})
+        with pytest.raises(ConfigError, match=r"got 'x' \(from payload\.port\)$"):
+            make(OLD_PORT).resolve(environ={}, layers=[payload])
+
+    def test_an_aliass_check_error_names_its_layer(self) -> None:
+        checked = Setting("listen.port", 8080, "", check=port, aliases=("port",))
+        with pytest.raises(
+            ConfigError, match=rf"^listen\.port: 0 is not a TCP port \(from {ETC}\)$"
+        ):
+            make(checked).resolve(environ={}, layers=[layer({"port": 0})])
+
+
+class TestAliasAcrossLevels:
+    def test_alias_variable_beats_the_key_in_the_file(self) -> None:
+        r = make(OLD_PORT).resolve(
+            environ={"APP_PORT": "2"}, layers=[layer({"listen": {"port": 1}})]
+        )
+        assert (r.values["listen.port"], r.sources["listen.port"]) == (2, "APP_PORT")
+
+    def test_alias_file_variable_beats_the_key_variable(self, tmp_path: Path) -> None:
+        (tmp_path / "port").write_text("3", encoding="utf-8")
+        environ = {"APP_PORT_FILE": str(tmp_path / "port"), "APP_LISTEN_PORT": "2"}
+        r = make(OLD_PORT).resolve(environ=environ, layers=[])
+        assert (r.values["listen.port"], r.sources["listen.port"]) == (3, "APP_PORT_FILE")
+
+    def test_an_alias_in_a_higher_layer_beats_the_key_in_a_lower_one(self) -> None:
+        upper = layer({"port": 1}, source="control plane", where="control plane (config v12)")
+        lower = layer({"listen": {"port": 2}})
+        r = make(OLD_PORT).resolve(environ={}, layers=[upper, lower])
+        assert (r.values["listen.port"], r.sources["listen.port"]) == (1, "control plane")
+
+    def test_the_key_variable_beats_an_alias_in_the_file_which_still_warns(self) -> None:
+        # Shadowed, not used: different values at different levels are no conflict.
+        r = make(OLD_PORT).resolve(environ={"APP_LISTEN_PORT": "2"}, layers=[layer({"port": 1})])
+        assert (r.values["listen.port"], r.sources["listen.port"]) == (2, "APP_LISTEN_PORT")
+        assert r.warnings == (alias_warning("port", ETC, "listen.port"),)
+
+    def test_every_alias_set_warns_used_or_shadowed(self) -> None:
+        twice = Setting("listen.port", 8080, "", aliases=("port", "bind.port"))
+        upper = layer({"listen": {"port": 1}, "bind": {"port": 1}}, where="/upper.yaml")
+        lower = layer({"port": 5, "bind": {"port": 6}})
+        environ = {"APP_PORT": "1", "APP_BIND_PORT_FILE": "/nonexistent/x"}
+        with pytest.raises(ConfigError, match="cannot read APP_BIND_PORT_FILE"):
+            make(twice).resolve(environ=environ, layers=[upper, lower])
+        del environ["APP_BIND_PORT_FILE"]
+        r = make(twice).resolve(environ=environ, layers=[upper, lower])
+        assert (r.values["listen.port"], r.sources["listen.port"]) == (1, "APP_PORT")
+        assert r.warnings == (
+            alias_warning("bind.port", "/upper.yaml", "listen.port"),
+            alias_warning("port", ETC, "listen.port"),
+            alias_warning("bind.port", ETC, "listen.port"),
+            alias_warning("APP_PORT", "the environment", "APP_LISTEN_PORT"),
+        )
+
+
+class TestAliasWarnings:
+    def test_aliases_are_known_names_never_unknown(self, tmp_path: Path) -> None:
+        moved = Setting("listen.port", 8080, "", aliases=("old.port",))
+        (tmp_path / "port").write_text("1", encoding="utf-8")
+        data = {"old": {"port": 1, "prot": 1}, "listen": {"port": 1}}
+        environ = {"APP_OLD_PORT": "1", "APP_OLD_PORT_FILE": str(tmp_path / "port")}
+        r = make(moved).resolve(environ=environ, layers=[layer(data)])
+        assert [(w.kind, w.name) for w in r.warnings] == [
+            ("alias", "old.port"),
+            ("unknown", "old.prot"),  # the control: below an alias's parent, still checked
+            ("alias", "APP_OLD_PORT"),
+            ("alias", "APP_OLD_PORT_FILE"),
+        ]
+
+    def test_an_alias_is_never_suggested(self) -> None:
+        renamed = Setting("listen.port", 8080, "", aliases=("port", "old.port"))
+        data = {"prot": 1, "old": {"prot": 1}}
+        assert warnings_of(make(renamed), layer(data), environ={"APP_PROT": "1"}) == [
+            f"unknown key 'prot' in {ETC}",
+            f"unknown key 'old.prot' in {ETC}",
+            "unknown variable 'APP_PROT' in the environment",
+        ]
+        # The control: with `port` the current name, each typo gets its suggestion.
+        current = make(Setting("port", 8080, ""))
+        assert warnings_of(current, layer({"prot": 1}), environ={"APP_PROT": "1"}) == [
+            f"unknown key 'prot' in {ETC}: did you mean 'port'?",
+            "unknown variable 'APP_PROT' in the environment: did you mean 'APP_PORT'?",
+        ]
+
+    def test_a_flat_dotted_alias_is_unknown_and_unread(self) -> None:
+        moved = Setting("listen.port", 8080, "", aliases=("old.port",))
+        r = make(moved).resolve(environ={}, layers=[layer({"old.port": 1})])
+        assert r.values["listen.port"] == 8080
+        assert [(w.kind, w.name) for w in r.warnings] == [("unknown", "old.port")]
+        # The control: nested, as resolution reads it, the alias is read and warns as one.
+        r = make(moved).resolve(environ={}, layers=[layer({"old": {"port": 1}})])
+        assert r.values["listen.port"] == 1
+        assert [(w.kind, w.name) for w in r.warnings] == [("alias", "old.port")]
+
+    def test_with_no_prefix_alias_variables_still_warn(self) -> None:
+        settings = Settings("", (OLD_PORT,), default_path=DEFAULT)
+        r = settings.resolve(environ={"PORT": "1", "PATH": "/bin"}, layers=[])
+        assert (r.values["listen.port"], r.sources["listen.port"]) == (1, "PORT")
+        assert r.warnings == (alias_warning("PORT", "the environment", "LISTEN_PORT"),)
+
+    def test_order_layers_in_document_order_then_variables_by_name(self) -> None:
+        data = {"z": 1, "port": 1, "a": 1}
+        environ = {"APP_Q": "", "APP_PORT": "1", "APP_B": ""}
+        r = make(OLD_PORT).resolve(environ=environ, layers=[layer(data)])
+        assert [(w.kind, w.name) for w in r.warnings] == [
+            ("unknown", "z"),
+            ("alias", "port"),
+            ("unknown", "a"),
+            ("unknown", "APP_B"),
+            ("alias", "APP_PORT"),
+            ("unknown", "APP_Q"),
+        ]
+
+
+class TestAliasDeclaration:
+    @pytest.mark.parametrize(
+        ("settings", "message"),
+        [
+            ((Setting("a", "", "", aliases="b"),), "'a': aliases are a tuple of dotted keys"),  # type: ignore[arg-type]  # the wrong type, on purpose
+            ((Setting("a", "", "", aliases=["b"]),), "'a': aliases are a tuple of dotted keys"),  # type: ignore[arg-type]  # the wrong type, on purpose
+            ((Setting("a", "", "", aliases=("B",)),), "'a': alias 'B': a key is lower-case"),
+            ((Setting("a", "", "", aliases=("b..c",)),), "'a': alias 'b..c': a key is lower"),
+            ((Setting("a", "", "", aliases=(1,)),), "'a': alias 1: a key is lower-case"),  # type: ignore[arg-type]  # the wrong type, on purpose
+            (
+                (Setting("a", "", "", aliases=("x.on",)),),
+                "'a': alias 'x.on': YAML doesn't read 'on'",
+            ),
+            ((Setting("a", "", "", aliases=("a",)),), "'a': alias 'a' is a setting's key"),
+            (
+                (Setting("a", "", "", aliases=("b",)), Setting("b", "", "")),
+                "'a': alias 'b' is a setting's key",
+            ),
+            ((Setting("a", "", "", aliases=("b", "b")),), "'a': alias 'b' named twice"),
+            (
+                (Setting("a", "", "", aliases=("c",)), Setting("b", "", "", aliases=("c",))),
+                "'b': alias 'c' is already an alias of 'a'",
+            ),
+            (
+                (Setting("listen.port", 0, "", aliases=("listen",)),),
+                "'listen.port': alias 'listen' and 'listen.port': one is a parent of the other",
+            ),
+            (
+                (Setting("a", "", "", aliases=("a.old",)),),
+                "'a': alias 'a.old' and 'a': one is a parent of the other",
+            ),
+            (
+                (Setting("a", "", "", aliases=("x.y", "x")),),
+                "'a': alias 'x' and 'x.y': one is a parent of the other",
+            ),
+            (
+                (Setting("a", "", "", aliases=("x",)), Setting("b", "", "", aliases=("x.y",))),
+                "'b': alias 'x.y' and 'x': one is a parent of the other",
+            ),
+            (
+                (Setting("listen.port", 0, "", aliases=("listen_port",)),),
+                "'listen.port': alias 'listen_port': APP_LISTEN_PORT is also read by 'listen.port'",
+            ),
+            ((Setting("a", "", "", aliases=("config",)),), "APP_CONFIG is also the config file"),
+            (
+                (Setting("x", "", ""), Setting("a", "", "", aliases=("x_file",))),
+                "'a': alias 'x_file': APP_X_FILE is also read by 'x'",
+            ),
+            (
+                (Setting("a", "", "", aliases=("p.q",)), Setting("b", "", "", aliases=("p_q",))),
+                "'b': alias 'p_q': APP_P_Q is also read by 'a' (its alias 'p.q')",
+            ),
+            (
+                (Setting("a", "", "", aliases=("p",)), Setting("b", "", "", aliases=("p_file",))),
+                "'b': alias 'p_file': APP_P_FILE is also read by 'a' (its alias 'p')",
+            ),
+        ],
+    )
+    def test_rejects(self, settings: tuple[Setting, ...], message: str) -> None:
+        with pytest.raises(ValueError, match=re.escape(message)):
+            make(*settings)
+
+    def test_extra_env_may_not_name_an_alias_variable(self) -> None:
+        with pytest.raises(ValueError, match=re.escape("extra_env 'APP_PORT': already read by")):
+            Settings("APP_", (OLD_PORT,), default_path=DEFAULT, extra_env=("APP_PORT",))
+
+    def test_accepts_aliases_that_share_a_parent_with_keys(self) -> None:
+        settings = make(
+            Setting("listen.port", 0, "", aliases=("old.port", "port")),
+            Setting("listen.host", "", "", aliases=("old.host",)),
+        )
+        assert [s.aliases for s in settings] == [("old.port", "port"), ("old.host",)]
+        r = settings.resolve(environ={}, layers=[layer({"old": {"port": 1, "host": "h"}})])
+        assert dict(r.values) == {"listen.port": 1, "listen.host": "h"}
+
+
+class TestAliasSecrets:
+    TOKEN = Setting("proxy.auth", "", "", secret=True, aliases=("auth",))
+
+    def test_a_secret_alias_resolves_masked(self) -> None:
+        r = make(self.TOKEN).resolve(environ={"APP_AUTH": VALUE}, layers=[])
+        assert r.secret("proxy.auth").reveal() == VALUE
+        assert r.sources["proxy.auth"] == "APP_AUTH"
+        assert VALUE not in f"{r!r} {r.warnings}"
+
+    def test_a_secret_aliass_value_is_in_no_message(self) -> None:
+        cases: list[tuple[Mapping[str, str], list[Layer]]] = [
+            ({"APP_PROXY_AUTH": VALUE, "APP_AUTH": VALUE + "x"}, []),
+            ({}, [layer({"proxy": {"auth": VALUE}, "auth": VALUE + "x"})]),
+            ({}, [layer({"auth": [VALUE]})]),
+        ]
+        for environ, layers in cases:
+            with pytest.raises(ConfigError) as e:
+                make(self.TOKEN).resolve(environ=environ, layers=layers)
+            assert "proxy.auth" in str(e.value)
+            assert VALUE not in str(e.value)
