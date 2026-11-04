@@ -2,9 +2,10 @@
 
 <!-- Add a line for this record to the index in docs/design/README.md (CI checks). -->
 
-Status: Proposed
+Status: Approved
 Date: 2026-11-03
 Authors: andronics; drafted by Claude
+Approved: 2026-11-04 by the brain coordinator for Stephen.
 
 ## Context
 
@@ -36,7 +37,8 @@ the comments on #32 and #35 and in its `src/qbt_rules/config.py` (read at its v0
   from a control-plane payload, not a file.
 
 The decisions below were approved by the brain coordinator for Stephen on 2026-11-03 (the shape of
-each; the details are this record's). This record stays Proposed until its review is merged.
+each; the details are this record's). The brain coordinator approved this record for Stephen on
+2026-11-04: decisions A to D and the recommended answers as written, with one condition, now decision E.
 
 Constraints, all from [0001](0001-initial-design.md) and [0007](0007-check-replacements-and-typed-accessors.md):
 
@@ -57,8 +59,8 @@ Five features, built in six PRs (see [Build order](#build-order)). The common pi
 
 ### Author's decisions
 
-Four choices the issues left open, made by this record and flagged for the reviewer. Each is detailed in
-the section named.
+Four choices the issues left open, made by this record and flagged for the reviewer, and a fifth (E),
+the condition of its approval. Each is detailed in the section named.
 
 - **A. `${VAR}` expansion is opt-in per project.** `Settings(..., expand=True)`; off by default, so no
   existing `${` in a file changes meaning ([section 4](#4-var-expansion-32)).
@@ -70,6 +72,12 @@ the section named.
   on a layer built from a remote payload: expansion there would let the control plane read the
   instance's environment. interpose can't tell a remote layer from a local one, so the rule is the
   project's to keep, and the Security wiki page says so ([section 1](#1-values-with-provenance-36)).
+- **E. Control-plane values never read secret files.** A `{secret_file: ...}` leaf is honoured only in a
+  layer with `secret_files=True`, which only `read_file()` and a section's `_FILE` set. In any other
+  layer, a remote payload above all, it is a `ConfigError` naming the section path and saying that secret
+  files are read only from local configuration. It is never read, and never kept as a plain mapping.
+  Otherwise a remote config could make the process read any local file it can see
+  ([section 5](#5-sections-and-lists-of-sections-35)).
 - **D. Changing file error messages is a breaking release.** An error about a file value names the path
   instead of `(from file)`. Code that matched the old text breaks, so the release that ships step 1 is
   marked breaking, though no value or source changes ([Consequences](#consequences)).
@@ -108,7 +116,7 @@ class Layer:
     where: str  # for messages: "/etc/qbt-rules/config.yaml", "control plane (config v12)"
     origins: Mapping[str, str] = field(default_factory=dict)  # dotted key -> a finer "where"
     expand: bool = False  # expand ${VAR} in its strings (section 4)
-    secret_files: bool = False  # read {secret_file: ...} leaves in sections (section 5)
+    secret_files: bool = False  # allow {secret_file: ...} leaves; else an error (decision E)
 
 
 class Settings:
@@ -145,7 +153,8 @@ class Settings:
   its local file, since `layers` replaces the file. Its rule that a managed key set locally is
   a `ConfigError` stays in mitm-proxy, which reads `sources`. A layer from a remote payload keeps
   `expand=False` (decision C): expanding `${VAR}` in it would let the control plane read the instance's
-  environment.
+  environment. It also keeps `secret_files=False` (decision E): a `{secret_file: ...}` leaf in it is a
+  `ConfigError`, never read.
 - `data` is read, never kept or changed; `Resolved` holds coerced copies.
 
 ### 2. Unknown keys warn, with a suggestion (#34)
@@ -207,7 +216,7 @@ Settings("QBT_RULES_", (...), default_path=..., expand=True, expand_unset="empty
   Variables and scalar `_FILE` contents never expand: the shell already did, and a secret file holding
   `${` must arrive as written.
 - **Syntax:** `${NAME}` and `${NAME:-default}`, `NAME` being `[A-Za-z_][A-Za-z0-9_]*`. `:-` takes the
-  default when the variable is unset or empty, as in the shell ([open question 1](#open-questions)). The
+  default when the variable is unset or empty, as in the shell ([question 1](#open-questions)). The
   default is literal text without `}` (no nested expansion). `$${` gives a literal `${`. Any other `${`
   (unclosed, a bad name) is a `ConfigError` naming the key: write `$${` for a literal. A `$` not
   followed by `{` is literal.
@@ -226,9 +235,9 @@ Settings("QBT_RULES_", (...), default_path=..., expand=True, expand_unset="empty
 - **Provenance:** `sources` stays the layer's (`"file"`); expansion is an implementation of the file.
 - **Differences from qbt-rules,** all deliberate: unset is an error unless `expand_unset="empty"`; a
   variable set to the empty string gives the `:-` default (qbt-rules gives the empty string, and
-  `expand_unset="empty"` doesn't change that: open question 1); `$${` is an escape (qbt-rules would give
-  `$` and the value); names are environment-variable names (qbt-rules takes anything but `}` and `:`,
-  so a `${vars.x}` that qbt-rules expands to empty is a `ConfigError` here).
+  `expand_unset="empty"` doesn't change that: [question 1](#open-questions)); `$${` is an escape
+  (qbt-rules would give `$` and the value); names are environment-variable names (qbt-rules takes
+  anything but `}` and `:`, so a `${vars.x}` that qbt-rules expands to empty is a `ConfigError` here).
 
 ### 5. Sections and lists of sections (#35)
 
@@ -265,8 +274,10 @@ Setting("reverse", "", "Reverse-proxy listeners.", is_section=True, is_list=True
   resolve, by a `Secret` holding that file's contents, trailing newline stripped as for `_FILE`. An
   unreadable file is a `ConfigError` naming the section path and the file, never the contents. This
   is mitm-proxy 0012's rule, made generic: no secret is written inline in a section. Secret leaves are
-  read in every section, not declared per setting ([open question 3](#open-questions)). A `Section`'s
-  `repr()` masks every `Secret` (it already does, `Secret` being masked).
+  read in every section, not declared per setting ([question 3](#open-questions)), but only from a layer
+  with `secret_files=True`; anywhere else one is a `ConfigError`, not silently ignored and never read
+  ([decision E](#authors-decisions)). A `Section`'s `repr()` masks every `Secret` (it already does,
+  `Secret` being masked).
 - **Typed items (optional, per setting).** A list section may declare its item fields:
 
   ```python
@@ -287,7 +298,7 @@ Setting("reverse", "", "Reverse-proxy listeners.", is_section=True, is_list=True
     usual ones, and `required=True` (allowed only on a field) makes a missing field an error. A field
     may be `secret=True` or a free-form section. An item resolves to a `Section` holding every field.
   - An unknown field in an item gives an `unknown` warning with a suggestion (section 2's rule, and
-    [open question 2](#open-questions)); errors name the item: `schedule[2].cron: ... (from
+    [question 2](#open-questions)); errors name the item: `schedule[2].cron: ... (from
     /etc/qbt-rules/config.yaml)`.
   - **Indexed variables.** Only with fields: `<PREFIX><KEY>_<N>_<FIELD>` and its `_FILE`, for `N` from
     0. Item `N` exists when any of its field variables is set; the first `N` with none ends the list. A
@@ -304,7 +315,9 @@ Setting("reverse", "", "Reverse-proxy listeners.", is_section=True, is_list=True
 - **Managed settings.** A section is managed or bootstrap like any setting; in a control-plane `Layer`,
   the payload's subtree is the value. A `{secret_file: ...}` leaf in a remote payload would make the
   instance read a local file the control plane names, so secret leaves are only read from local layers
-  (the file and `_FILE`); a `Layer` must say `secret_files=True` to allow them (default false).
+  (the file and `_FILE`); a `Layer` must say `secret_files=True` to allow them (default false). In a
+  layer without it, such a leaf is a `ConfigError` naming the section path and saying that secret files
+  are read only from local configuration; the file is never opened ([decision E](#authors-decisions)).
 - **Reload.** Resolution is the same on every call; a reload gets fresh `Section`s and secret-leaf
   contents, and compares by equality.
 - **The wiki table.** The consumers' `scripts/gen-wiki.py` (template-owned, from template-python;
@@ -337,7 +350,9 @@ One PR per step, each with its tests and wiki changes, each released on its own:
 3. **Aliases (#33):** uses 2's warnings and 2's "known name" set.
 4. **Expansion (#32):** `expand`, `expand_unset`, the escape.
 5. **Free-form sections (#35):** `is_section`, `Section`, section `_FILE`, secret leaves, `section()`
-   accessors. mitm-proxy's capture step (a) can pin this release.
+   accessors. Its tests include decision E's: a `{secret_file: ...}` leaf in a layer without
+   `secret_files` (a control-plane layer) raises `ConfigError` with that reason, and the file is not
+   opened. mitm-proxy's capture step (a) can pin this release.
 6. **Typed items and indexed variables (#35):** `fields`, `required`, the indexed form. The last
    qbt-rules needs to drop its own loader.
 
@@ -378,17 +393,20 @@ TODO.md's "Decided against" gains the first, third and sixth.
 - **Breaking, in small ways:** file errors name the path instead of `file`; `Value` gains two types, so
   an exhaustive `match` on it needs two more cases. The release that ships step 1 is marked breaking
   (decision D), and so is the one that ships step 5.
-- qbt-rules: a variable set to the empty string now gives a `${VAR:-default}` its default (open question
-  1), a lone `SCHEDULE_<N>_CONTEXT` is now an error, and a `${...}` whose name isn't an environment
+- qbt-rules: a variable set to the empty string now gives a `${VAR:-default}` its default (question 1),
+  a lone `SCHEDULE_<N>_CONTEXT` is now an error, and a `${...}` whose name isn't an environment
   variable name is now an error. Its changelog says so when it adopts steps 4 and 6.
 - 0001's "Unknown YAML keys are ignored" is amended by this record (a note there points here); 0001
   itself isn't rewritten.
 - Wiki: Introduction (sections leave the non-goals; nested objects are now a section), API-Reference
   (every new name), Architecture-Internals (layers, the order with aliases, expansion, unknown keys),
-  Security (expansion and secrets, secret leaves, remote layers), Quick-Start (a section and a warning),
+  Security (expansion and secrets, secret leaves, remote layers, and decision E: a secret leaf in a
+  control-plane layer is an error and is never read), Quick-Start (a section and a warning),
   Troubleshooting (the "ignored key" entry becomes the warning), Testing-Guide.
 
 ## Open questions
+
+Answered by the brain coordinator for Stephen on 2026-11-04, each with the recommended answer.
 
 1. **Should `${VAR:-default}` use the default when `VAR` is set but empty?** Recommend yes, as the
    POSIX shell does: an empty variable is nearly always a mistake or a placeholder, and the shell rule is
@@ -397,9 +415,11 @@ TODO.md's "Decided against" gains the first, third and sixth.
    Its example config mentions the syntax without using `:-`, and its own deployments' files weren't
    reachable from here, so whether any rely on the empty value is unknown. If one does, it breaks on
    adopting step 4, and `expand_unset="empty"` doesn't cover it; qbt-rules checks before it adopts.
+   **Answer: yes,** the default when set but empty, as the shell does.
 2. **Should an unknown field inside a typed item warn, or be an error?** Recommend warn, the same rule
    as section 2. mitm-proxy 0012 wants errors for its capture options, which are free-form and
-   validated by mitm-proxy; for `reverse`'s typed items it can raise on the warning.
+   validated by mitm-proxy; for `reverse`'s typed items it can raise on the warning. **Answer: warn.**
 3. **Should secret leaves be on in every section, or declared per setting?** Recommend on in every
    section: sections are new, so no file changes meaning, and one rule is easier to document. The cost
-   is that `{secret_file: ...}` alone in a mapping is reserved inside sections.
+   is that `{secret_file: ...}` alone in a mapping is reserved inside sections. **Answer: on in every
+   section,** read from local layers only ([decision E](#authors-decisions)).
