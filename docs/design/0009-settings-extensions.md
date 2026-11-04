@@ -112,7 +112,9 @@ class Layer:
 
 
 class Settings:
-    def read_file(self, path: Path | None = None, environ: Mapping[str, str] | None = None) -> Layer:
+    def read_file(
+        self, path: Path | None = None, environ: Mapping[str, str] | None = None
+    ) -> Layer:
         """The config file as a Layer (source "file", where = the path, expand = self.expand,
         secret_files = True).
         Path resolution, the missing-file and parse rules are resolve()'s."""
@@ -268,10 +270,17 @@ Setting("reverse", "", "Reverse-proxy listeners.", is_section=True, is_list=True
 - **Typed items (optional, per setting).** A list section may declare its item fields:
 
   ```python
-  Setting("schedule", "", "Cron schedule.", is_section=True, is_list=True, fields=(
-      Setting("cron", "", "A 5-field cron expression.", required=True),
-      Setting("context", "", "The context to enqueue.", required=True),
-  ))
+  Setting(
+      "schedule",
+      "",
+      "Cron schedule.",
+      is_section=True,
+      is_list=True,
+      fields=(
+          Setting("cron", "", "A 5-field cron expression.", required=True),
+          Setting("context", "", "The context to enqueue.", required=True),
+      ),
+  )
   ```
 
   - A field is a `Setting` with a one-part key; its default sets its type, coercion and `check` are the
