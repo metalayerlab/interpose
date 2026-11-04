@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.0](https://github.com/metalayerlab/interpose/compare/v0.4.3...v0.5.0) (2026-11-04)
+
+
+### ⚠ BREAKING CHANGES
+
+* **settings:** a relative secret_file path now resolves against the directory of the file that names it, not the working directory, and a secret_file path starting with ~ is refused with a ConfigError.
+
+### ✨ Features
+
+* **settings:** resolve a relative secret_file against its file's directory ([#60](https://github.com/metalayerlab/interpose/issues/60)) ([6ff1f14](https://github.com/metalayerlab/interpose/commit/6ff1f14409ce29c290f4b158adb71ca81a68dfc9))
+
 ## [0.4.3](https://github.com/metalayerlab/interpose/compare/v0.4.2...v0.4.3) (2026-11-04)
 
 
