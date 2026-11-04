@@ -84,7 +84,7 @@ Config(log_level='INFO', port=9090, token=Secret('********'), hosts=('example.or
                 'upstream.token': 'MYAPP_UPSTREAM_TOKEN_FILE', 'allow.hosts': 'file'})
 ```
 
-`config.token.reveal()` gives the token at the point of use. A bad value stops it with one line, such as `listen.port: expected int, got 0.5 (from file)`.
+`config.token.reveal()` gives the token at the point of use. A bad value stops it with one line, such as `listen.port: expected int, got 0.5 (from /etc/myapp/config.yaml)`.
 
 For secrets that aren't settings (a middleware's API keys, say), `read_secret_dir(Path("/run/secrets"))` reads each file in a directory as a `Secret`.
 

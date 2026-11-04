@@ -9,7 +9,7 @@ Four modules and no global state. A consumer's `config.py` builds one `Settings`
 ```mermaid
 flowchart LR
     C[consumer config.py] -->|declares| S[Settings]
-    S -->|resolve| Y[YAML file]
+    S -->|resolve| Y[YAML file, or the project's layers]
     S -->|resolve| E[environment and _FILE]
     S --> R[Resolved: values + sources]
     R -->|secret=True| SEC[Secret]
@@ -22,7 +22,7 @@ flowchart LR
 |---|---|
 | `interpose/__init__.py` | Package version and description |
 | `interpose/pipeline.py` | `Policy`, `Entry`, `Pipeline`, `Run`, `Failure`, `HookFailed`: the middleware loop and the guard around every hook |
-| `interpose/settings.py` | `Setting`, `Settings`, `Resolved`, `ConfigError`, coercion, the single-value checks |
+| `interpose/settings.py` | `Setting`, `Settings`, `Layer`, `Resolved`, `ConfigError`, coercion, the single-value checks |
 | `interpose/secret.py` | `Secret`, `MASK`, `read_secret_dir` |
 | `interpose/metrics.py` | `Label`, `Counter`, `Gauge`, `Histogram`, `Registry`, `CONTENT_TYPE`: Prometheus text exposition |
 
@@ -63,11 +63,11 @@ With a limit, `asyncio.timeout` (a timer scheduled and cancelled per call) is mo
 
 ### Settings
 
-`Settings.resolve(path, environ)`:
+`Settings.resolve(path, environ, *, layers)`:
 
-1. **The file.** `path`, else `environ[<PREFIX>CONFIG]`, else `default_path`. Missing or empty means `{}`. A top level that isn't a mapping, unreadable, not UTF-8 or invalid YAML is a `ConfigError`. A YAML error gives the line and column only, because pyyaml's own message quotes the line, which may hold a secret.
-2. **Each setting, in declaration order**, takes its raw value from the first of `<ENV>_FILE` (the file's text, trailing whitespace stripped), `<ENV>`, the YAML value at the dotted key, or the default. A YAML `null`, or a scalar where a mapping is expected, counts as absent. The source is recorded.
-3. **Coercion** to the setting's type. Anything else is a `ConfigError` naming the key, the type and the source:
+1. **The layers.** Without `layers`, the one layer is the file (`read_file`): `path`, else `environ[<PREFIX>CONFIG]`, else `default_path`, with source `"file"` and `where` the path. Missing or empty means `{}`. A top level that isn't a mapping, unreadable, not UTF-8 or invalid YAML is a `ConfigError`. A YAML error gives the line and column only, because pyyaml's own message quotes the line, which may hold a secret. With `layers`, no file is read: the project's layers take its place, first one first (a control-plane payload, then the local file, say: [0009](https://github.com/metalayerlab/interpose/blob/main/docs/design/0009-settings-extensions.md)).
+2. **Each setting, in declaration order**, takes its raw value from the first of `<ENV>_FILE` (the file's text, trailing whitespace stripped), `<ENV>`, each layer's value at the dotted key in order, or the default. A YAML `null`, or a scalar where a mapping is expected, counts as absent, so the next layer is tried. The source is recorded: the variable, the layer's `source` (`"file"` for the file), or `"default"`. For a value from a layer, so is where it came from: `origins[key]` if the layer has it, else its `where`. A layer's `data` is only read.
+3. **Coercion** to the setting's type. Anything else is a `ConfigError` naming the key, the type and where the value came from (the variable, `default`, or the layer's `where`, which for the file is its path):
 
    | Type | Accepts | Refuses (the drifted cases) |
    |---|---|---|
@@ -77,7 +77,7 @@ With a limit, `asyncio.timeout` (a timer scheduled and cancelled per call) is mo
    | list | a YAML list of scalars, or a comma-separated string; items stripped, empties dropped | a mapping, nested lists, a bare YAML number or bool |
 
    Strings from the environment and `_FILE` go through the same rules, so `"0.5"` fails `int` everywhere. pyyaml types YAML 1.1 values first: `yes` is already `True`, `1_000` is already `1000`.
-4. **`check`**, on every value, the default included. Its `ValueError` becomes `ConfigError("<key>: <reason>")`, with a secret value masked out of the reason. A value it returns replaces the coerced one if it is the setting's kind, else a `ConfigError`; a secret setting's value is never replaced ([0007](https://github.com/metalayerlab/interpose/blob/main/docs/design/0007-check-replacements-and-typed-accessors.md)).
+4. **`check`**, on every value, the default included. Its `ValueError` becomes `ConfigError("<key>: <reason>")`, then `(from <where>)` for a value from a layer, with a secret value masked out of the reason. A value it returns replaces the coerced one if it is the setting's kind, else a `ConfigError`; a secret setting's value is never replaced ([0007](https://github.com/metalayerlab/interpose/blob/main/docs/design/0007-check-replacements-and-typed-accessors.md)).
 5. **`secret=True`** wraps the value in `Secret`, after the check.
 
 Nothing is cached, and nothing is logged. The first error stops the resolve.

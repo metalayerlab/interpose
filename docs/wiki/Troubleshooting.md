@@ -4,11 +4,11 @@
 
 interpose logs nothing: values are never logged, and it has no logger to turn up. To see what was resolved, print `Resolved.sources` (safe: it's where each value came from), or the consumer's `config` command, which prints each key, its value (secrets masked) and its source.
 
-Every error is a `ConfigError` with one line that names the key, the expected type and where the value came from: `file`, `default` or a variable name.
+Every error is a `ConfigError` with one line that names the key, the expected type and where the value came from: the config file's path (or, for a project that passes layers, the layer's description), `default` or a variable name.
 
 ## Common problems
 
-### "expected int, got 0.5 (from file)"
+### "expected int, got 0.5 (from /etc/myapp/config.yaml)"
 
 The YAML file gives a float, or a bool or string, for an int setting. interpose refuses rather than truncating. Write a whole number. `"1_000"` from the environment is refused too; write `1000`.
 
@@ -20,7 +20,7 @@ A bool takes `1/true/yes/on` or `0/false/no/off`, in any case.
 
 A YAML list or mapping for a str setting. If the setting should hold several values, the project declares it with `is_list=True`.
 
-### "expected list, got 5 (from file)"
+### "expected list, got 5 (from /etc/myapp/config.yaml)"
 
 A list setting takes a YAML list, or a string of comma-separated items. Write `[5]` or `"5"`.
 

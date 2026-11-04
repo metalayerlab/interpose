@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ import pytest
 from interpose.secret import MASK, Secret
 from interpose.settings import (
     ConfigError,
+    Layer,
     Resolved,
     Setting,
     Settings,
@@ -303,6 +305,169 @@ class TestConfigPath:
             settings.resolve(path, {})
 
 
+# --- layers (design 0009, step 1) ---------------------------------------------------------------
+
+ETC = "/etc/app/config.yaml"
+
+
+def layer(data: Mapping[str, Any], where: str = ETC, **kwargs: Any) -> Layer:
+    return Layer(data=data, source=kwargs.pop("source", "file"), where=where, **kwargs)
+
+
+class TestLayers:
+    def test_first_layer_that_has_the_key_wins(self) -> None:
+        first = Layer({"a": "a0"}, source="control plane", where="control plane (config v12)")
+        second = Layer({"a": "a1", "b": "b1"}, source="file", where=ETC)
+        settings = make(Setting("a", "", ""), Setting("b", "", ""), Setting("c", "dflt", ""))
+        r = settings.resolve(environ={}, layers=[first, second])
+        assert dict(r.values) == {"a": "a0", "b": "b1", "c": "dflt"}
+        assert dict(r.sources) == {"a": "control plane", "b": "file", "c": "default"}
+
+    def test_a_null_in_a_layer_falls_through_to_the_next(self) -> None:
+        r = make(PORT).resolve(
+            environ={},
+            layers=[
+                layer({"listen": {"port": None}}),
+                layer({"listen": {"port": 2}}, source="second"),
+            ],
+        )
+        assert (r.values["listen.port"], r.sources["listen.port"]) == (2, "second")
+
+    def test_file_variable_and_variable_beat_every_layer(self, tmp_path: Path) -> None:
+        (tmp_path / "a").write_text("from-file-var\n", encoding="utf-8")
+        environ = {"APP_A_FILE": str(tmp_path / "a"), "APP_B": "from-var"}
+        top = layer({"a": "layer", "b": "layer"}, source="control plane")
+        r = make(Setting("a", "", ""), Setting("b", "", "")).resolve(environ=environ, layers=[top])
+        assert dict(r.values) == {"a": "from-file-var", "b": "from-var"}
+        assert dict(r.sources) == {"a": "APP_A_FILE", "b": "APP_B"}
+
+    def test_path_with_layers_is_a_value_error(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="path or layers, not both"):
+            make(PORT).resolve(tmp_path / "config.yaml", {}, layers=[layer({})])
+
+    def test_no_layers_means_defaults_and_environment_only(self, tmp_path: Path) -> None:
+        config = tmp_path / "config.yaml"
+        config.write_text("a: from-file\nb: from-file\n", encoding="utf-8")
+        environ = {"APP_CONFIG": str(config), "APP_B": "from-var"}
+        settings = Settings(
+            "APP_", (Setting("a", "dflt", ""), Setting("b", "", "")), default_path=config
+        )
+        r = settings.resolve(environ=environ, layers=[])
+        assert dict(r.values) == {"a": "dflt", "b": "from-var"}
+        assert dict(r.sources) == {"a": "default", "b": "APP_B"}
+
+    def test_read_file_is_the_implicit_file_layer(self, tmp_path: Path) -> None:
+        config = tmp_path / "config.yaml"
+        config.write_text("listen:\n  port: 1\n", encoding="utf-8")
+        settings = make(PORT, Setting("a", "dflt", ""))
+        environ = {"APP_CONFIG": str(config), "APP_A": "x"}
+        file_layer = settings.read_file(environ=environ)
+        assert file_layer == Layer({"listen": {"port": 1}}, source="file", where=str(config))
+        assert settings.resolve(environ=environ, layers=[file_layer]) == settings.resolve(
+            environ=environ
+        )
+        assert settings.read_file(config, {}) == file_layer
+
+    def test_read_file_of_a_missing_file_is_an_empty_layer(self, tmp_path: Path) -> None:
+        missing = tmp_path / "missing.yaml"
+        assert make(PORT).read_file(missing, {}) == Layer({}, source="file", where=str(missing))
+        assert make(PORT).read_file(environ={}).where == str(DEFAULT)
+
+    def test_read_file_has_resolves_errors(self, tmp_path: Path) -> None:
+        path = tmp_path / "config.yaml"
+        path.write_text("- a\n", encoding="utf-8")
+        with pytest.raises(ConfigError, match=f"^{re.escape(str(path))}: the top level must be"):
+            make(PORT).read_file(path, {})
+
+    def test_read_file_defaults_to_os_environ(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("APP_CONFIG", str(tmp_path / "from-os.yaml"))
+        assert make(PORT).read_file().where == str(tmp_path / "from-os.yaml")
+
+    def test_sources_say_file_for_the_file_layer(self, tmp_path: Path) -> None:
+        config = tmp_path / "config.yaml"
+        config.write_text("a: x\n", encoding="utf-8")
+        settings = make(Setting("a", "", ""))
+        assert settings.resolve(config, {}).sources["a"] == "file"
+        assert settings.resolve(environ={}, layers=[settings.read_file(config, {})]).sources == {
+            "a": "file"
+        }
+
+    def test_coercion_error_names_the_layers_where(self) -> None:
+        with pytest.raises(ConfigError) as info:
+            make(PORT).resolve(environ={}, layers=[layer({"listen": {"port": "x"}})])
+        assert str(info.value) == f"listen.port: expected int, got 'x' (from {ETC})"
+
+    def test_origins_beat_where(self) -> None:
+        top = layer(
+            {"listen": {"port": "x"}, "a": "ok"},
+            origins={"listen.port": f"{ETC}, line 3", "a": "elsewhere"},
+        )
+        with pytest.raises(ConfigError) as info:
+            make(PORT, Setting("a", "", "")).resolve(environ={}, layers=[top])
+        assert str(info.value) == f"listen.port: expected int, got 'x' (from {ETC}, line 3)"
+
+    def test_check_error_names_the_layer(self) -> None:
+        settings = make(Setting("listen.port", 8080, "", check=port))
+        with pytest.raises(ConfigError) as info:
+            settings.resolve(environ={}, layers=[layer({"listen": {"port": 70000}})])
+        assert str(info.value) == f"listen.port: 70000 is not a TCP port (from {ETC})"
+        top = layer({"listen": {"port": 70000}}, origins={"listen.port": "payload.listen"})
+        with pytest.raises(ConfigError, match=r"TCP port \(from payload.listen\)$"):
+            settings.resolve(environ={}, layers=[top])
+
+    def test_check_error_names_the_config_file(self, tmp_path: Path) -> None:
+        settings = make(Setting("n", 1, "", check=positive))
+        with pytest.raises(ConfigError) as info:
+            resolve_yaml(tmp_path, "n: 0\n", *settings)
+        assert (
+            str(info.value) == f"n: must be greater than 0, got 0 (from {tmp_path / 'config.yaml'})"
+        )
+
+    def test_check_errors_for_a_variable_or_default_still_name_no_source(self) -> None:
+        settings = make(Setting("n", 0, "", check=positive))
+        with pytest.raises(ConfigError, match=r"^n: must be greater than 0, got 0$"):
+            settings.resolve(environ={}, layers=[layer({"other": 1})])
+        with pytest.raises(ConfigError, match=r"^n: must be greater than 0, got -1$"):
+            settings.resolve(environ={"APP_N": "-1"}, layers=[layer({"n": 5})])
+
+    def test_a_secrets_value_is_in_no_message(self) -> None:
+        def echo(value: Value) -> None:
+            raise ValueError(f"{value!r} is not user:password")
+
+        checked = Setting("proxy.auth", "", "", secret=True, check=echo)
+        where = layer({"proxy": {"auth": VALUE}}, origins={"proxy.auth": "payload.proxy.auth"})
+        with pytest.raises(ConfigError) as info:
+            make(checked).resolve(environ={}, layers=[where])
+        assert (
+            str(info.value)
+            == f"proxy.auth: '{MASK}' is not user:password (from payload.proxy.auth)"
+        )
+        with pytest.raises(ConfigError) as info:
+            make(AUTH).resolve(environ={}, layers=[layer({"proxy": {"auth": [VALUE]}})])
+        assert str(info.value) == f"proxy.auth: expected str (from {ETC})"
+        assert VALUE not in repr(info.value)
+
+    def test_data_is_neither_changed_nor_kept(self) -> None:
+        data: dict[str, Any] = {"hosts": ["a", " b "], "n": "5"}
+        snapshot = {"hosts": ["a", " b "], "n": "5"}
+        r = make(LIST_SETTING, Setting("n", 0, "")).resolve(environ={}, layers=[layer(data)])
+        assert data == snapshot
+        assert dict(r.values) == {"hosts": ("a", "b"), "n": 5}
+        data["n"] = "6"
+        assert r.values["n"] == 5
+
+    def test_layer_is_frozen_and_origins_default_to_empty(self) -> None:
+        top = Layer({}, source="file", where=ETC)
+        assert top.origins == {}
+        with pytest.raises(AttributeError):
+            top.where = "x"  # type: ignore[misc]  # asserting that frozen=True refuses this
+
+
+LIST_SETTING = Setting("hosts", "", "", is_list=True)
+
+
 # --- _FILE ---------------------------------------------------------------------------------------
 
 
@@ -421,7 +586,8 @@ class TestBool:
 
     @pytest.mark.parametrize("text", ["2", "-1", "1.0", "0.0", "[true]", "{a: 1}", "maybe"])
     def test_bad_from_yaml(self, tmp_path: Path, text: str) -> None:
-        with pytest.raises(ConfigError, match=r"^flag: expected bool, got .* \(from file\)$"):
+        where = re.escape(str(tmp_path / "config.yaml"))
+        with pytest.raises(ConfigError, match=rf"^flag: expected bool, got .* \(from {where}\)$"):
             yaml_value(tmp_path, FLAG, text)
 
     def test_default_is_returned_as_is(self, tmp_path: Path) -> None:
@@ -467,12 +633,14 @@ class TestInt:
         ],
     )
     def test_bad_from_yaml(self, tmp_path: Path, text: str) -> None:
-        with pytest.raises(ConfigError, match=r"^count: expected int, got .* \(from file\)$"):
+        where = re.escape(str(tmp_path / "config.yaml"))
+        with pytest.raises(ConfigError, match=rf"^count: expected int, got .* \(from {where}\)$"):
             yaml_value(tmp_path, COUNT, text)
 
     def test_message_shows_the_value(self, tmp_path: Path) -> None:
-        with pytest.raises(ConfigError, match=r"^count: expected int, got 0.5 \(from file\)$"):
+        with pytest.raises(ConfigError) as info:
             yaml_value(tmp_path, COUNT, "0.5")
+        assert str(info.value) == f"count: expected int, got 0.5 (from {tmp_path / 'config.yaml'})"
 
 
 class TestStr:
@@ -722,7 +890,7 @@ class TestSecretSettings:
     def test_coercion_error_omits_the_value(self, tmp_path: Path) -> None:
         with pytest.raises(ConfigError) as info:
             resolve_yaml(tmp_path, f"proxy:\n  auth: [{VALUE}]\n", AUTH)
-        assert str(info.value) == "proxy.auth: expected str (from file)"
+        assert str(info.value) == f"proxy.auth: expected str (from {tmp_path / 'config.yaml'})"
         assert VALUE not in repr(info.value)
         assert info.value.__cause__ is None
         assert info.value.__context__ is None or info.value.__suppress_context__
