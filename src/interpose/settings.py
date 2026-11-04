@@ -24,6 +24,12 @@ A project may opt in to ``${VAR}`` expansion in its config file (`Settings(..., 
 design 0009): ``${NAME}`` and ``${NAME:-default}`` in a value a setting reads from the file take the
 variable's value, before typing. Variables, ``_FILE`` contents and a `Layer` the project builds
 never expand, unless that layer says `expand=True`.
+
+A setting may be a section (`Setting(..., is_section=True)`, design 0009): its value is the YAML
+subtree at its key, deep-frozen as a `Section` (or, with `is_list=True`, a tuple of them), read from
+``<PREFIX><KEY>_FILE`` as a YAML file or from the layers; never from a plain variable. interpose
+checks only its shape. Inside a section, ``{secret_file: <path>}`` becomes a `Secret` holding that
+file, read only from local configuration (a `Layer` with `secret_files=True`).
 """
 
 from __future__ import annotations
@@ -48,6 +54,7 @@ __all__ = [
     "ConfigWarning",
     "Layer",
     "Resolved",
+    "Section",
     "Setting",
     "Settings",
     "Value",
@@ -56,8 +63,6 @@ __all__ = [
     "port",
     "positive",
 ]
-
-Value = str | int | bool | tuple[str, ...] | Secret
 
 _KEY = re.compile(r"[a-z0-9_]+(\.[a-z0-9_]+)*")
 # ASCII digits only: int() would also take "1_000" and other scripts' digits.
@@ -96,6 +101,110 @@ class ConfigWarning:
         return self.message
 
 
+# What a section holds (design 0009, section 5): scalars as YAML loads them, secret leaves, nested
+# sections and tuples. A datetime is a date.
+type Node = str | int | float | bool | datetime.date | Secret | Section | tuple[Node, ...] | None
+
+
+class Section(Mapping[str, Node]):
+    """A section setting's value: a read-only, deep-frozen mapping (design 0009, section 5).
+
+    Nested mappings are `Section`s, lists are tuples, scalars are as YAML loaded them (str, int,
+    float, bool, date, datetime, `None`), and a secret leaf is a `Secret`. Nothing in it can be
+    changed, at any depth. A `Section` is hashable, and equal only to another `Section` with the
+    same keys and values of the same types (`1` is not `True`, and `1` is not `1.0`), so a reload
+    can compare old and new. `repr()` masks every `Secret`.
+
+    `Section(mapping)` freezes a mapping of the same shape (a check builds its replacement this
+    way): a non-str key, or a value of any other type, is a `TypeError`.
+    """
+
+    __slots__ = ("_hash", "_items", "_strict")
+
+    _items: Mapping[str, Node]
+    _strict: frozenset[tuple[str, object]]
+    _hash: int
+
+    def __init__(self, mapping: Mapping[str, Any] | None = None) -> None:
+        items: dict[str, Node] = {}
+        for key, child in ({} if mapping is None else mapping).items():
+            if not isinstance(key, str):
+                raise TypeError(f"a Section's keys are str, not {type(key).__name__}")
+            items[key] = _freeze(child)
+        self._init(items)
+
+    @classmethod
+    def _of(cls, items: dict[str, Node]) -> Section:
+        """A `Section` of items already frozen, which only it holds from now on."""
+        section = object.__new__(cls)
+        section._init(items)
+        return section
+
+    def _init(self, items: dict[str, Node]) -> None:
+        if hasattr(self, "_hash"):  # `section.__init__(...)` again would replace its items
+            raise AttributeError("a Section is read-only")
+        strict = frozenset((key, _strict(child)) for key, child in items.items())
+        object.__setattr__(self, "_items", MappingProxyType(items))
+        object.__setattr__(self, "_strict", strict)
+        object.__setattr__(self, "_hash", hash(strict))
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("a Section is read-only")
+
+    def __delattr__(self, name: str) -> None:
+        raise AttributeError("a Section is read-only")
+
+    def __getitem__(self, key: str) -> Node:
+        return self._items[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._items)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Section):
+            return NotImplemented
+        return self._strict == other._strict
+
+    def __hash__(self) -> int:
+        return self._hash
+
+    def __repr__(self) -> str:
+        # A Secret's repr() is masked, and a nested Section's or tuple's uses its items' repr().
+        return "Section({" + ", ".join(f"{k!r}: {v!r}" for k, v in self._items.items()) + "})"
+
+    def __reduce__(self) -> tuple[type[Section], tuple[dict[str, Node]]]:
+        # copy and pickle would otherwise set the slots through the blocked __setattr__.
+        return (Section, (dict(self._items),))
+
+
+def _freeze(node: object) -> Node:
+    """A value for `Section(...)`, frozen: a mapping becomes a `Section`, a list or tuple a
+    tuple."""
+    if node is None or isinstance(node, Section | Secret | str | int | float | datetime.date):
+        return cast(Node, node)  # bool is an int; datetime is a date
+    if isinstance(node, Mapping):
+        return Section(node)
+    if isinstance(node, list | tuple):
+        return tuple(_freeze(item) for item in node)
+    raise TypeError(f"a Section holds mappings, lists and scalars, not {type(node).__name__}")
+
+
+def _strict(node: Node) -> object:
+    """What `Section` equality and hashing compare for a value: its type with it, so `1`, `True`
+    and `1.0` differ, as do a date and a datetime (a Section or Secret compares itself)."""
+    if isinstance(node, tuple):
+        return (tuple, tuple(_strict(item) for item in node))
+    if isinstance(node, Section | Secret):
+        return node
+    return (type(node), node)
+
+
+Value = str | int | bool | tuple[str, ...] | Secret | Section | tuple[Section, ...]
+
+
 @dataclass(frozen=True)
 class Setting:
     """One setting: its dotted key, default (which sets its type), help and flags.
@@ -108,6 +217,10 @@ class Setting:
     `aliases` are the setting's old dotted keys, read wherever its key is (design 0009): the key in
     every layer, `<PREFIX><ALIAS>` and `<PREFIX><ALIAS>_FILE`. Each one that is set gives an `alias`
     warning.
+
+    `is_section` makes it a section (design 0009): its value is a `Section`, or with `is_list` a
+    tuple of them, and its default must be `""` (empty). A section can't be `secret`, but may hold
+    secret leaves. Its `check` gets the `Section` (or tuple) and may return another.
     """
 
     key: str
@@ -118,6 +231,7 @@ class Setting:
     check: Callable[[Value], Value | None] | None = None
     prefix: str = ""
     aliases: tuple[str, ...] = ()
+    is_section: bool = False
 
     @property
     def env(self) -> str:
@@ -140,8 +254,14 @@ class Layer:
     never changes or keeps it.
 
     `expand` makes `${VAR}` in the values settings read from here expand. `read_file()` sets it to
-    the project's `Settings(expand=...)`, and is the only place interpose sets it. Never set it on a
-    layer built from a remote payload: it would let the sender read this process's environment.
+    the project's `Settings(expand=...)` (as a section's `_FILE` expands with it), and is the only
+    place interpose sets it. Never set it on a layer built from a remote payload: it would let the
+    sender read this process's environment.
+
+    `secret_files` lets a section here hold `{secret_file: <path>}` leaves, read into `Secret`s;
+    without it, such a leaf is a `ConfigError` and its file is never opened (design 0009, decision
+    E). `read_file()` sets it, as does a section's `_FILE`. Never set it on a layer built from a
+    remote payload: it would let the sender read any file this process can.
     """
 
     data: Mapping[str, Any]
@@ -149,32 +269,41 @@ class Layer:
     where: str
     origins: Mapping[str, str] = field(default_factory=dict)
     expand: bool = False
+    secret_files: bool = False
 
 
 @dataclass(frozen=True)
 class Resolved:
     """Typed values and where each came from, both keyed by setting key, in declaration order.
 
-    `values` holds `Secret` for secret settings and a tuple for list settings. `sources` holds the
-    `_FILE` variable's name, the environment variable's name (an alias's, when that is what was
-    read), `"file"` (or the `source` of the `Layer` the value came from) or `"default"`. `warnings`
+    `values` holds `Secret` for secret settings, a tuple for list settings, a `Section` for section
+    settings and a tuple of them for list sections. `sources` holds the `_FILE` variable's name,
+    the environment variable's name (an alias's, when that is what was read), `"file"` (or the
+    `source` of the `Layer` the value came from) or `"default"`. `warnings`
     holds a `ConfigWarning` for each unknown key and prefixed variable and each alias that is set,
     in the order found: layers first, in order, then variables by name.
 
-    The typed accessors (`str`, `int`, `bool`, `list`, `secret`) give a value with its type, and
-    raise `TypeError` naming the key when the setting is another kind (`str()` on a secret
-    setting, above all), or `KeyError` for a key that isn't declared (design 0007).
+    The typed accessors (`str`, `int`, `bool`, `list`, `secret`, `section`, `sections`) give a
+    value with its type, and raise `TypeError` naming the key when the setting is another kind
+    (`str()` on a secret setting, above all), or `KeyError` for a key that isn't declared (design
+    0007).
     """
 
     values: Mapping[builtins.str, Value]
     sources: Mapping[builtins.str, builtins.str]
     warnings: tuple[ConfigWarning, ...] = ()
+    # Each section setting's kind, from its declaration: an empty list section's () would
+    # otherwise look like an empty list setting's.
+    _kinds: Mapping[builtins.str, builtins.str] = field(
+        default_factory=lambda: MappingProxyType({}), repr=False, compare=False
+    )
 
     def _kind(self, key: builtins.str, kind: builtins.str) -> Value:
         value = self.values[key]
-        if _kind_of(value) != kind:
-            hint = ": use secret() and reveal()" if isinstance(value, Secret) else ""
-            raise TypeError(f"{key!r} is a {_kind_of(value)} setting, not {kind}{hint}")
+        actual = self._kinds.get(key) or _kind_of(value)
+        if actual != kind:
+            hint = _HINTS.get(actual, "")
+            raise TypeError(f"{key!r} is a {actual} setting, not {kind}{hint}")
         return value
 
     def str(self, key: builtins.str) -> builtins.str:
@@ -197,12 +326,32 @@ class Resolved:
         """A secret setting's value; `reveal()` it at the point of use."""
         return cast(Secret, self._kind(key, "secret"))
 
+    def section(self, key: builtins.str) -> Section:
+        """A section setting's value (design 0009)."""
+        return cast(Section, self._kind(key, "section"))
+
+    def sections(self, key: builtins.str) -> tuple[Section, ...]:
+        """A list section's value: a `Section` for each item (design 0009)."""
+        return cast(tuple[Section, ...], self._kind(key, "list of sections"))
+
+
+# What a TypeError from a typed accessor adds for a kind with its own accessor.
+_HINTS = {
+    "secret": ": use secret() and reveal()",
+    "section": ": use section()",
+    "list of sections": ": use sections()",
+}
+
 
 def _kind_of(value: object) -> str:
     """The kind of setting a resolved value comes from: exact, since coercion is strict."""
     if isinstance(value, Secret):
         return "secret"
+    if isinstance(value, Section):
+        return "section"
     if isinstance(value, tuple):
+        if value and all(isinstance(item, Section) for item in value):
+            return "list of sections"
         return "list"
     if isinstance(value, bool):
         return "bool"
@@ -260,6 +409,13 @@ class Settings(Sequence[Setting]):
                 if name in names:
                     raise ValueError(f"{setting.key!r}: {name} is also {names[name]}")
                 names[name] = f"read by {setting.key!r}"
+            if setting.is_section and setting.default != "":
+                raise ValueError(f'{setting.key!r}: a section setting\'s default must be ""')
+            if setting.is_section and setting.secret:
+                # A Secret holds one string. A section holds secrets as secret leaves instead.
+                raise ValueError(
+                    f"{setting.key!r}: a section can't be secret: use secret_file leaves in it"
+                )
             if setting.is_list and setting.default != "":
                 raise ValueError(f'{setting.key!r}: a list setting\'s default must be ""')
             if setting.secret and (setting.is_list or not isinstance(setting.default, str)):
@@ -267,6 +423,17 @@ class Settings(Sequence[Setting]):
                 raise ValueError(f"{setting.key!r}: a secret setting must be a str setting")
             seen.add(setting.key)
             bound.append(replace(setting, prefix=prefix))
+        # A section owns its whole subtree: a key below it would be read as part of its value too,
+        # and a key above it would make its value a mapping. (Aliases are checked against every
+        # key, sections' included, below.)
+        for setting in bound:
+            if setting.is_section:
+                for other in sorted(seen):
+                    if other.startswith(setting.key + ".") or setting.key.startswith(other + "."):
+                        raise ValueError(
+                            f"{setting.key!r}: a section, and {other!r}: "
+                            "one is a parent of the other"
+                        )
         # Aliases once every key is known: an alias may equal no key, declared before or after.
         alias_of: dict[str, str] = {}  # alias -> its setting's key
         alias_env: dict[str, str] = {}  # an alias's variable -> the key's ("_FILE" for "_FILE")
@@ -300,10 +467,11 @@ class Settings(Sequence[Setting]):
         self.expand_unset: Literal["error", "empty"] = expand_unset
         self._settings = tuple(bound)
         # The names the unknown-key and unknown-variable checks accept (design 0009, section 2):
-        # every key and alias, their parents, and every variable a setting or alias reads. Later
-        # steps add to these: sections (step 5) add their keys to `_leaf_keys`, so nothing below one
-        # is checked; list sections with fields (step 6) add their indexed variables (an alias's
-        # too) and check items' fields. Suggestions come from current names only, never aliases.
+        # every key and alias, their parents, and every variable a setting or alias reads. A
+        # section's key (or alias) is a leaf, so nothing below it is checked: its content is the
+        # project's. List sections with fields (step 6) will add their indexed variables (an
+        # alias's too) and check items' fields. Suggestions come from current names only, never
+        # aliases.
         self._alias_of = MappingProxyType(alias_of)
         self._alias_env = MappingProxyType(alias_env)
         self._leaf_keys = frozenset(seen) | frozenset(alias_of)
@@ -372,7 +540,8 @@ class Settings(Sequence[Setting]):
     def read_file(
         self, path: Path | None = None, environ: Mapping[str, str] | None = None
     ) -> Layer:
-        """The config file as a `Layer`: source `"file"`, `where` its path, `expand` the project's.
+        """The config file as a `Layer`: source `"file"`, `where` its path, `expand` the project's,
+        and `secret_files` on.
 
         `path` defaults to `<PREFIX>CONFIG`, else `default_path`; a missing file is an empty layer.
         `environ` defaults to `os.environ`. Raises `ConfigError` if it can't be read or parsed.
@@ -381,9 +550,15 @@ class Settings(Sequence[Setting]):
         env = os.environ if environ is None else environ
         if path is None:
             path = Path(env.get(self.config_env, str(self.default_path)))
-        # The one place interpose sets `expand` (design 0009, decision C). A section's `_FILE`
-        # (step 5) will expand with the project's setting too.
-        return Layer(data=_read_yaml(path), source="file", where=str(path), expand=self.expand)
+        # With a section's `_FILE`, the places interpose sets `expand` (design 0009, decision C)
+        # and `secret_files` (decision E): local configuration only.
+        return Layer(
+            data=_read_yaml(path),
+            source="file",
+            where=str(path),
+            expand=self.expand,
+            secret_files=True,
+        )
 
     def resolve(
         self,
@@ -400,6 +575,9 @@ class Settings(Sequence[Setting]):
         `layers` replaces the file: no file is read, and each setting takes its `_FILE` variable,
         then its variable, then the first layer that has it, then its default. Passing `path` too
         is a `ValueError`. Without `layers`, the file is the one layer (`read_file(path, environ)`).
+
+        A section takes its `_FILE` (a YAML file), then the first layer that has it, then empty;
+        its plain variable is a `ConfigError`. Its secret leaves are read on every call.
         """
         env = os.environ if environ is None else environ
         if layers is None:
@@ -408,16 +586,24 @@ class Settings(Sequence[Setting]):
             raise ValueError("resolve(): pass path or layers, not both (layers replace the file)")
         values: dict[str, Value] = {}
         sources: dict[str, str] = {}
+        kinds: dict[str, str] = {}
         for setting in self._settings:
-            values[setting.key], sources[setting.key] = _resolve_one(
-                setting, layers, env, self.expand_unset
-            )
+            if setting.is_section:
+                kinds[setting.key] = "list of sections" if setting.is_list else "section"
+                values[setting.key], sources[setting.key] = _resolve_section(
+                    setting, layers, env, self.expand, self.expand_unset
+                )
+            else:
+                values[setting.key], sources[setting.key] = _resolve_one(
+                    setting, layers, env, self.expand_unset
+                )
         warnings = [w for layer in layers for w in self._layer_warnings(layer)]
         warnings += self._env_warnings(env)
         return Resolved(
             values=MappingProxyType(values),
             sources=MappingProxyType(sources),
             warnings=tuple(warnings),
+            _kinds=MappingProxyType(kinds),
         )
 
     def _layer_warnings(
@@ -476,19 +662,24 @@ def _read_yaml(path: Path) -> Mapping[str, Any]:
         raise ConfigError(f"cannot read {path}: {e.strerror}") from None
     except UnicodeDecodeError:
         raise ConfigError(f"cannot read {path}: not UTF-8") from None
-    try:
-        loaded = yaml.safe_load(text)
-    except yaml.YAMLError as e:
-        # str(e) quotes the offending line, which may hold a secret: give its position only.
-        mark = getattr(e, "problem_mark", None)
-        where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
-        problem = getattr(e, "problem", None) or "invalid YAML"
-        raise ConfigError(f"cannot parse {path}{where}: {problem}") from None
+    loaded = _parse_yaml(text, str(path))
     if loaded is None:
         return {}
     if not isinstance(loaded, dict):
         raise ConfigError(f"{path}: the top level must be a mapping")
     return loaded
+
+
+def _parse_yaml(text: str, label: str) -> Any:
+    """`yaml.safe_load(text)`; an error names `label` (a path) and the position, never the text."""
+    try:
+        return yaml.safe_load(text)
+    except yaml.YAMLError as e:
+        # str(e) quotes the offending line, which may hold a secret: give its position only.
+        mark = getattr(e, "problem_mark", None)
+        where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
+        problem = getattr(e, "problem", None) or "invalid YAML"
+        raise ConfigError(f"cannot parse {label}{where}: {problem}") from None
 
 
 def _yaml_text(key: object) -> str:
@@ -539,7 +730,8 @@ class _Found:
     source: str  # what `sources` says: a variable's name, a layer's `source`, "default"
     where: str | None  # for a layer's value, where errors say it came from; else None
     name: str  # what a same-level conflict names: the variable, or the key or alias
-    expand: bool = False  # from a layer with `expand=True`: never a variable or `_FILE`
+    expand: bool = False  # a layer's `expand`, or a section's `_FILE`: never a variable
+    secret_files: bool = False  # secret leaves may be read: a layer's `secret_files`, or `_FILE`
 
     @property
     def origin(self) -> str:
@@ -547,21 +739,41 @@ class _Found:
         return self.source if self.where is None else self.where
 
 
-def _found(setting: Setting, layers: Sequence[Layer], environ: Mapping[str, str]) -> list[_Found]:
+def _found(
+    setting: Setting, layers: Sequence[Layer], environ: Mapping[str, str], expand: bool = False
+) -> list[_Found]:
     """What the setting's key and aliases hold at the first level of the order where any is set:
     `_FILE`, then the variable, then each layer; else the default. The key comes first, then the
     aliases in declaration order. (A list section's indexed variables, step 6, are one more level
-    the aliases share.)"""
+    the aliases share.)
+
+    A section's `_FILE` is a YAML file, which expands with the project's `expand`; its plain
+    variable is never read, and setting it is a `ConfigError`."""
     names = (setting.key, *setting.aliases)
     variables = [_env_name(setting.prefix, name) for name in names]
+    if setting.is_section and (plain := [var for var in variables if var in environ]):
+        # A mapping in a variable is unreadable (design 0009): say so, rather than ignore it.
+        raise ConfigError(
+            f"{setting.key}: {plain[0]} is set, but a section is read from a YAML file, never a "
+            f"variable: set {plain[0]}_FILE to the file's path"
+        )
     files = [f"{var}_FILE" for var in variables if f"{var}_FILE" in environ]
     if files:
+        if setting.is_section:
+            return [_read_section_file(setting, var, environ, expand) for var in files]
         return [_Found(_read_file_variable(var, environ), var, None, var) for var in files]
     if set_vars := [var for var in variables if var in environ]:
         return [_Found(environ[var], var, None, var) for var in set_vars]
     for layer in layers:
         found = [
-            _Found(raw, layer.source, layer.origins.get(name, layer.where), name, layer.expand)
+            _Found(
+                raw,
+                layer.source,
+                layer.origins.get(name, layer.where),
+                name,
+                layer.expand,
+                layer.secret_files,
+            )
             for name in names
             if (raw := _lookup(layer.data, name)) is not None
         ]
@@ -578,6 +790,35 @@ def _read_file_variable(file_var: str, environ: Mapping[str, str]) -> str:
         raise ConfigError(f"cannot read {file_var} ({path}): {e.strerror}") from None
     except UnicodeDecodeError:
         raise ConfigError(f"cannot read {file_var} ({path}): not UTF-8") from None
+
+
+def _read_section_file(
+    setting: Setting, file_var: str, environ: Mapping[str, str], expand: bool
+) -> _Found:
+    """A section's `_FILE`: the YAML file it names, local configuration like the config file
+    (`secret_files` on, `expand` the project's). An empty file is an empty section."""
+    path = Path(environ[file_var])
+    label = f"{file_var} ({path})"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        raise ConfigError(f"cannot read {label}: {e.strerror}") from None
+    except UnicodeDecodeError:
+        raise ConfigError(f"cannot read {label}: not UTF-8") from None
+    loaded = _parse_yaml(text, label)
+    if loaded is None:
+        loaded = [] if setting.is_list else {}
+    return _Found(loaded, file_var, label, file_var, expand, secret_files=True)
+
+
+def _conflict(setting: Setting, first: _Found, other: _Found) -> ConfigError:
+    """The key and an alias (or two aliases) set at one level to different values. The message
+    names both, never either value."""
+    place = "the environment" if other.where is None else other.where
+    return ConfigError(
+        f"{setting.key}: set as both {first.name!r} and its old name {other.name!r} "
+        f"(from {place}), to different values"
+    )
 
 
 def _resolve_one(
@@ -599,11 +840,7 @@ def _resolve_one(
             setting, _expanded(setting, other, environ, unset), other.origin, other.raw
         )
         if other_value != value:
-            place = "the environment" if other.where is None else other.where
-            raise ConfigError(
-                f"{setting.key}: set as both {first.name!r} and its old name {other.name!r} "
-                f"(from {place}), to different values"
-            )
+            raise _conflict(setting, first, other)
     if setting.check is not None:
         try:
             replacement = setting.check(value)
@@ -629,6 +866,197 @@ def _resolve_one(
     return value, source
 
 
+_Sections = Section | tuple[Section, ...]  # a section setting's value
+
+
+def _resolve_section(
+    setting: Setting,
+    layers: Sequence[Layer],
+    environ: Mapping[str, str],
+    expand: bool,
+    unset: Literal["error", "empty"],
+) -> tuple[Value, str]:
+    """A section setting's value (design 0009, section 5): `_resolve_one`'s order, alias rule and
+    check, with a shape check and secret leaves in place of coercion."""
+    first, *others = _found(setting, layers, environ, expand)
+    expanded = _expanded(setting, first, environ, unset)
+    value = _section_of(setting, expanded, first)
+    for other in others:
+        if _section_of(setting, _expanded(setting, other, environ, unset), other) != value:
+            raise _conflict(setting, first, other)
+    if setting.check is not None:
+        try:
+            replacement = setting.check(value)
+        except ValueError as e:
+            reason = str(e)
+            if expanded is not first.raw:
+                # A leaf can embed a secret variable (`https://user:${PASS}@host`): show the text
+                # as written, as for any setting.
+                reason = _swap(reason, list(_changed_strings(first.raw, expanded)), bounded=False)
+            # A check shouldn't echo a secret leaf at all; if it reveals one, it is masked.
+            secrets = {
+                v for s in _secrets_in(value) if s for v in (s, repr(s)[1:-1], ascii(s)[1:-1])
+            }
+            for form in sorted(secrets, key=len, reverse=True):
+                reason = reason.replace(form, MASK)
+            origin = "" if first.where is None else f" (from {first.where})"
+            raise ConfigError(f"{setting.key}: {reason}{origin}") from None
+        if replacement is not None:
+            value = _section_replacement(setting, replacement)
+    return value, first.source
+
+
+def _section_replacement(setting: Setting, replacement: Value) -> _Sections:
+    """A check's replacement for a section, if it is a `Section` (a tuple of them for a list
+    section). Errors name types, never values."""
+    if setting.is_list:
+        if isinstance(replacement, tuple) and all(isinstance(i, Section) for i in replacement):
+            return cast(tuple[Section, ...], replacement)
+        expected = "a tuple of Section"
+    elif isinstance(replacement, Section):
+        return replacement
+    else:
+        expected = "Section"
+    raise ConfigError(
+        f"{setting.key}: its check returned {type(replacement).__name__}, expected {expected}"
+    )
+
+
+def _section_of(setting: Setting, raw: Any, found: _Found) -> _Sections:
+    """`raw` as the section's value, deep-frozen, its secret leaves read. Only the shape is
+    checked: a mapping (a list of them for a list section) with string keys at every level."""
+    if found.source == "default":
+        return () if setting.is_list else Section._of({})
+    if not setting.is_list:
+        if not isinstance(raw, Mapping):
+            raise ConfigError(
+                f"{setting.key}: expected a section (a mapping), got {_shape(raw)} "
+                f"(from {found.origin})"
+            )
+        return _section_mapping(raw, setting.key, found)
+    if not isinstance(raw, list | tuple):
+        raise ConfigError(
+            f"{setting.key}: expected a list of sections (mappings), got {_shape(raw)} "
+            f"(from {found.origin})"
+        )
+    items: list[Section] = []
+    for index, item in enumerate(raw):
+        path = f"{setting.key}[{index}]"
+        if not isinstance(item, Mapping):
+            raise ConfigError(
+                f"{path}: expected a section (a mapping), got {_shape(item)} (from {found.origin})"
+            )
+        items.append(_section_mapping(item, path, found))
+    return tuple(items)
+
+
+def _shape(node: object) -> str:
+    """What an error says a value is, never the value: `a mapping`, `a list`, `str`."""
+    if isinstance(node, Mapping):
+        return "a mapping"
+    if isinstance(node, list | tuple):
+        return "a list"
+    return type(node).__name__
+
+
+def _is_secret_leaf(node: Mapping[Any, Any]) -> bool:
+    """`{secret_file: <path>}`, exactly: the one key, nothing beside it."""
+    return len(node) == 1 and "secret_file" in node
+
+
+def _section_mapping(node: Mapping[Any, Any], path: str, found: _Found) -> Section:
+    if _is_secret_leaf(node):
+        # Only a section itself, or a list section's item, gets here (a nested leaf is a
+        # `_section_node`'s): it must be a mapping, not a Secret. Decision E's error comes first.
+        _refuse_remote_secret_file(path, found)
+        raise ConfigError(
+            f"{path}: a section is a mapping, so a secret_file leaf goes under a key in it "
+            f"(from {found.origin})"
+        )
+    items: dict[str, Node] = {}
+    for key, child in node.items():
+        if not isinstance(key, str):
+            raise ConfigError(
+                f"{path}.{_yaml_text(key)}: a section's keys are strings, and this one is "
+                f"{type(key).__name__}: quote it (from {found.origin})"
+            )
+        items[key] = _section_node(child, f"{path}.{key}", found)
+    return Section._of(items)
+
+
+def _section_node(node: Any, path: str, found: _Found) -> Node:
+    if node is None or isinstance(node, Secret | str | int | float | datetime.date):
+        return cast(Node, node)  # bool is an int; datetime is a date
+    if isinstance(node, Mapping):
+        if _is_secret_leaf(node):
+            return _secret_leaf(node, path, found)
+        return _section_mapping(node, path, found)
+    if isinstance(node, list | tuple):
+        return tuple(_section_node(item, f"{path}[{i}]", found) for i, item in enumerate(node))
+    raise ConfigError(
+        f"{path}: a section holds mappings, lists and scalars, not {type(node).__name__} "
+        f"(from {found.origin})"
+    )
+
+
+def _secret_leaf(node: Mapping[Any, Any], path: str, found: _Found) -> Secret:
+    """A `{secret_file: <path>}` leaf as a `Secret` holding the file, trailing whitespace stripped
+    as for `_FILE`. Only from local configuration: anywhere else it is an error, and the file is
+    never opened (design 0009, decision E). Errors name the path and file, never the contents."""
+    _refuse_remote_secret_file(path, found)
+    file = node["secret_file"]
+    if not isinstance(file, str) or not file:
+        raise ConfigError(f"{path}.secret_file: expected a file's path (from {found.origin})")
+    try:
+        text = Path(file).read_text(encoding="utf-8")
+    except OSError as e:
+        raise ConfigError(
+            f"{path}: cannot read secret_file {file}: {e.strerror} (from {found.origin})"
+        ) from None
+    except UnicodeDecodeError:
+        raise ConfigError(
+            f"{path}: cannot read secret_file {file}: not UTF-8 (from {found.origin})"
+        ) from None
+    return Secret(text.rstrip())
+
+
+def _refuse_remote_secret_file(path: str, found: _Found) -> None:
+    """Decision E: a secret leaf from a layer without `secret_files` (a control-plane payload,
+    above all) would make this process read a file the sender names. It is an error, never read
+    and never kept as a plain mapping."""
+    if not found.secret_files:
+        raise ConfigError(
+            f"{path}: secret files are read only from local configuration (the config file or a "
+            f"section's _FILE), not from {found.origin}"
+        )
+
+
+def _secrets_in(node: object) -> Iterator[str]:
+    """Every secret leaf's value in a section's value, for masking."""
+    if isinstance(node, Secret):
+        yield node.reveal()
+    elif isinstance(node, Section):
+        for child in node.values():
+            yield from _secrets_in(child)
+    elif isinstance(node, tuple):
+        for child in node:
+            yield from _secrets_in(child)
+
+
+def _changed_strings(written: Any, expanded: Any) -> Iterator[tuple[str, str]]:
+    """(expanded, written) for each string expansion changed, walking both trees together:
+    expansion keeps the shape and the keys."""
+    if isinstance(written, str):
+        if written != expanded:
+            yield expanded, written
+    elif isinstance(written, Mapping):
+        for key, child in written.items():
+            yield from _changed_strings(child, expanded[key])
+    elif isinstance(written, list | tuple):
+        for w, e in zip(written, expanded, strict=True):
+            yield from _changed_strings(w, e)
+
+
 def _expanded(
     setting: Setting, found: _Found, environ: Mapping[str, str], unset: Literal["error", "empty"]
 ) -> Any:
@@ -648,6 +1076,8 @@ def _expand_node(node: Any, text: Callable[[str], str]) -> Any:
         return text(node)
     if isinstance(node, list):
         return [_expand_node(item, text) for item in node]
+    if isinstance(node, tuple):  # a project-built layer's section may hold tuples
+        return tuple(_expand_node(item, text) for item in node)
     if isinstance(node, Mapping):
         return {key: _expand_node(child, text) for key, child in node.items()}
     return node
@@ -707,7 +1137,12 @@ def _as_written(reason: str, value: _Plain, written: Any, expanded: Any) -> str:
     else:
         pairs = [(str(value), written)]
     # An int or bool is replaced as a whole word only: 50 is not inside 500.
-    bounded = not isinstance(value, str | tuple)
+    return _swap(reason, pairs, bounded=not isinstance(value, str | tuple))
+
+
+def _swap(reason: str, pairs: list[tuple[str, str]], bounded: bool) -> str:
+    """`reason` with each pair's first text replaced by its second, longest first, as written and
+    inside a repr() or ascii(); `bounded` replaces whole words only."""
     for old, new in sorted(pairs, key=lambda pair: len(pair[0]), reverse=True):
         if not old:
             continue

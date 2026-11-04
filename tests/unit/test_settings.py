@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import copy
+import datetime
 import logging
 import os
+import pickle
 import re
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -17,6 +20,7 @@ from interpose.settings import (
     ConfigWarning,
     Layer,
     Resolved,
+    Section,
     Setting,
     Settings,
     Value,
@@ -363,7 +367,9 @@ class TestLayers:
         settings = make(PORT, Setting("a", "dflt", ""))
         environ = {"APP_CONFIG": str(config), "APP_A": "x"}
         file_layer = settings.read_file(environ=environ)
-        assert file_layer == Layer({"listen": {"port": 1}}, source="file", where=str(config))
+        assert file_layer == Layer(
+            {"listen": {"port": 1}}, source="file", where=str(config), secret_files=True
+        )
         assert settings.resolve(environ=environ, layers=[file_layer]) == settings.resolve(
             environ=environ
         )
@@ -371,7 +377,9 @@ class TestLayers:
 
     def test_read_file_of_a_missing_file_is_an_empty_layer(self, tmp_path: Path) -> None:
         missing = tmp_path / "missing.yaml"
-        assert make(PORT).read_file(missing, {}) == Layer({}, source="file", where=str(missing))
+        assert make(PORT).read_file(missing, {}) == Layer(
+            {}, source="file", where=str(missing), secret_files=True
+        )
         assert make(PORT).read_file(environ={}).where == str(DEFAULT)
 
     def test_read_file_has_resolves_errors(self, tmp_path: Path) -> None:
@@ -1975,3 +1983,948 @@ class TestExpansionMessages:
             environ={"API_TOKEN": VALUE}, layers=[layer(plain, expand=True)]
         )
         assert r.secret("proxy.auth").reveal() == VALUE
+
+
+# --- sections (design 0009, step 5) --------------------------------------------------------------
+
+MW = Setting("middleware.config", "", "Per-middleware options.", is_section=True)
+REVERSE = Setting("reverse", "", "Reverse-proxy listeners.", is_section=True, is_list=True)
+CONTROL = "control plane (config v12)"
+
+
+def control(data: Mapping[str, Any], **kwargs: Any) -> Layer:
+    """A layer as a managed-mode project builds one from a control-plane payload."""
+    return Layer(data, source="control plane", where=CONTROL, **kwargs)
+
+
+def secret_file(tmp_path: Path, text: str = VALUE + "\n", name: str = "token") -> Path:
+    path = tmp_path / name
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+class TestSectionDeclaration:
+    def test_is_section_is_public_and_off_by_default(self) -> None:
+        assert make(MW)[0].is_section is True
+        assert Setting("a", "", "").is_section is False
+        assert make(MW).resolve(DEFAULT, {}).values["middleware.config"] == Section()
+
+    @pytest.mark.parametrize("is_list", [False, True])
+    def test_the_default_must_be_empty(self, is_list: bool) -> None:
+        with pytest.raises(ValueError, match=r"'s': a section setting's default must be \"\"$"):
+            make(Setting("s", "x", "", is_section=True, is_list=is_list))
+        with pytest.raises(ValueError, match="default must be"):
+            make(Setting("s", 0, "", is_section=True))
+
+    def test_a_section_cant_be_secret(self) -> None:
+        with pytest.raises(ValueError, match=r"'s': a section can't be secret: use secret_file"):
+            make(Setting("s", "", "", is_section=True, secret=True))
+
+    @pytest.mark.parametrize(
+        "other",
+        [
+            Setting("middleware.config.x", "", ""),  # below the section
+            Setting("middleware", "", ""),  # above it
+        ],
+    )
+    @pytest.mark.parametrize("section_first", [True, False])
+    def test_a_section_is_no_parent_or_child_of_a_key(
+        self, other: Setting, section_first: bool
+    ) -> None:
+        settings = (MW, other) if section_first else (other, MW)
+        with pytest.raises(ValueError) as info:
+            make(*settings)
+        assert str(info.value) == (
+            f"'middleware.config': a section, and {other.key!r}: one is a parent of the other"
+        )
+
+    def test_only_a_parent_or_child_clashes_not_a_sibling(self) -> None:
+        make(MW, Setting("middleware.order", "", ""), Setting("middleware.configs", "", ""))
+        with pytest.raises(ValueError, match=r"a section, and 'middleware\.config\.x'"):
+            make(MW, Setting("middleware.order", "", ""), Setting("middleware.config.x", "", ""))
+
+    def test_aliases_clash_with_a_section_as_with_any_key(self) -> None:
+        # A section's own subtree check first (new), then the alias rule applied to sections.
+        with pytest.raises(ValueError, match=r"'old': a section, and 'old\.x'"):
+            make(Setting("old", "", "", is_section=True), Setting("old.x", "", ""))
+        moved = Setting("x", "", "", aliases=("middleware.config.x",))
+        with pytest.raises(ValueError, match="one is a parent of the other"):
+            make(MW, moved)
+        moved = Setting("mw", "", "", is_section=True, aliases=("old",))
+        with pytest.raises(ValueError, match="one is a parent of the other"):
+            make(moved, Setting("old.x", "", ""))
+
+
+class TestSectionValue:
+    def test_freezes_nested_mappings_and_lists(self) -> None:
+        day = datetime.date(2026, 11, 4)
+        when = datetime.datetime(2026, 11, 4, 10, 0)
+        s = Section({"a": {"b": [1, {"c": None}], "t": (True, 1.5)}, "d": day, "w": when})
+        assert isinstance(s["a"], Section)
+        a: Any = s["a"]  # a Node: Any to index it further
+        assert a["b"] == (1, Section({"c": None}))
+        assert isinstance(a["b"][1], Section)
+        assert a["t"] == (True, 1.5)
+        assert (s["d"], s["w"]) == (day, when)
+        assert list(s) == ["a", "d", "w"]
+        assert len(s) == 3
+        assert "a" in s
+        assert s.get("nope") is None
+        assert Section() == Section({}) and len(Section()) == 0
+
+    def test_a_section_value_is_kept_as_it_is(self) -> None:
+        inner = Section({"x": 1})
+        assert Section({"i": inner})["i"] is inner
+
+    def test_a_non_str_key_is_a_type_error(self) -> None:
+        with pytest.raises(TypeError, match="a Section's keys are str, not int"):
+            Section({1: "x"})  # type: ignore[dict-item]  # the point: a non-str key
+        with pytest.raises(TypeError, match="not bool"):
+            Section({"a": {True: "x"}})
+
+    @pytest.mark.parametrize("value", [b"x", {"a"}, object()])
+    def test_another_type_is_a_type_error(self, value: object) -> None:
+        with pytest.raises(TypeError, match="a Section holds mappings, lists and scalars, not"):
+            Section({"a": [value]})
+
+    def test_it_cant_be_changed_at_any_depth(self) -> None:
+        s = Section({"a": {"b": [1, {"c": 2}]}, "l": [1]})
+        with pytest.raises(TypeError):
+            s["a"] = 1  # type: ignore[index]  # the point: a Section has no __setitem__
+        with pytest.raises(TypeError):
+            del s["a"]  # type: ignore[attr-defined]  # nor __delitem__
+        with pytest.raises(TypeError):
+            cast(Any, s)["a"]["b"][1]["c"] = 3  # nested too
+        with pytest.raises(AttributeError):
+            s["l"].append(2)  # type: ignore[union-attr]  # a list is a tuple
+        with pytest.raises(AttributeError, match="read-only"):
+            s._items = {}  # the slots are blocked
+        with pytest.raises(AttributeError, match="read-only"):
+            del s._items
+        with pytest.raises(AttributeError, match="read-only"):
+            s.extra = 1
+        with pytest.raises(TypeError):
+            s._items["a"] = 1  # type: ignore[index]  # a read-only view
+        with pytest.raises(AttributeError, match="read-only"):
+            s.__init__({"a": 2})  # type: ignore[misc]  # the point: init twice is refused
+        assert s["l"] == (1,)
+        assert not hasattr(s, "__dict__")
+
+    def test_freezing_copies_so_the_source_cant_change_it(self) -> None:
+        source: dict[str, Any] = {"a": [1], "b": {"c": 1}}
+        s = Section(source)
+        source["a"].append(2)
+        source["b"]["c"] = 2
+        source["d"] = 1
+        assert s == Section({"a": [1], "b": {"c": 1}})
+
+    def test_equal_content_is_equal_and_hashes_the_same(self) -> None:
+        a = Section({"x": 1, "n": {"l": [1, "two"]}, "k": Secret(VALUE)})
+        b = Section({"n": {"l": (1, "two")}, "k": Secret(VALUE), "x": 1})  # another order
+        assert a == b
+        assert hash(a) == hash(b)
+        assert len({a, b}) == 1
+        assert a != Section({"x": 1, "n": {"l": [1, "two"]}, "k": Secret("other")})
+        assert a != Section({"x": 2, "n": {"l": [1, "two"]}, "k": Secret(VALUE)})
+
+    @pytest.mark.parametrize(
+        ("left", "right"),
+        [
+            (1, True),
+            (1, 1.0),
+            (0, False),
+            ("1", 1),
+            (datetime.date(2026, 1, 1), datetime.datetime(2026, 1, 1)),
+            ([1], [True]),
+            ({"a": 1}, {"a": True}),
+        ],
+    )
+    def test_values_of_another_type_differ(self, left: object, right: object) -> None:
+        # Python says 1 == True == 1.0; a config that changes `1` to `true` has changed.
+        assert Section({"v": left}) != Section({"v": right})
+
+    def test_equal_only_to_a_section(self) -> None:
+        assert Section({"a": 1}) != {"a": 1}
+        assert dict(Section({"a": 1})) == {"a": 1}
+
+    def test_repr_masks_every_secret(self) -> None:
+        s = Section({"token": Secret(VALUE), "n": {"l": [Secret(VALUE)]}, "u": "user"})
+        text = repr(s)
+        assert VALUE not in text
+        assert text == (
+            "Section({'token': Secret('********'), 'n': Section({'l': (Secret('********'),)}), "
+            "'u': 'user'})"
+        )
+        assert VALUE not in str(s)
+
+    def test_copy_and_pickle_give_an_equal_section(self) -> None:
+        s = Section({"a": {"b": [1, "x"]}})
+        assert copy.copy(s) == s
+        assert copy.deepcopy(s) == s
+        assert pickle.loads(pickle.dumps(s)) == s  # noqa: S301  # our own bytes, just made
+
+
+class TestSectionSources:
+    def test_a_mapping_section_from_the_file(self, tmp_path: Path) -> None:
+        text = (
+            "middleware:\n  config:\n    auth: {realm: x, users: [a, b], retries: 3}\n"
+            "    ratio: 0.5\n    on_: true\n    day: 2026-11-04\n    at: 2026-11-04 10:00:00\n"
+            "    none: null\n"
+        )
+        r = resolve_yaml(tmp_path, text, MW)
+        value = r.values["middleware.config"]
+        assert value == Section(
+            {
+                "auth": {"realm": "x", "users": ["a", "b"], "retries": 3},
+                "ratio": 0.5,
+                "on_": True,
+                "day": datetime.date(2026, 11, 4),
+                "at": datetime.datetime(2026, 11, 4, 10, 0),
+                "none": None,
+            }
+        )
+        assert r.sources["middleware.config"] == "file"
+        assert r.warnings == ()
+
+    def test_a_list_section_from_the_file(self, tmp_path: Path) -> None:
+        text = "reverse:\n  - {listen: ':80', upstream: a}\n  - {listen: ':81', upstream: b}\n"
+        r = resolve_yaml(tmp_path, text, REVERSE)
+        assert r.values["reverse"] == (
+            Section({"listen": ":80", "upstream": "a"}),
+            Section({"listen": ":81", "upstream": "b"}),
+        )
+        assert r.sources["reverse"] == "file"
+
+    def test_an_empty_mapping_in_the_file_is_an_empty_section(self, tmp_path: Path) -> None:
+        r = resolve_yaml(tmp_path, "middleware: {config: {}}\nreverse: []\n", MW, REVERSE)
+        assert (r.values["middleware.config"], r.values["reverse"]) == (Section(), ())
+        assert dict(r.sources) == {"middleware.config": "file", "reverse": "file"}
+
+    def test_the_default_is_empty(self) -> None:
+        r = make(MW, REVERSE).resolve(DEFAULT, {})
+        assert r.values["middleware.config"] == Section()
+        assert r.values["reverse"] == ()
+        assert dict(r.sources) == {"middleware.config": "default", "reverse": "default"}
+
+    def test_a_null_falls_through_to_the_next_layer(self) -> None:
+        r = make(MW).resolve(
+            environ={},
+            layers=[
+                control({"middleware": {"config": None}}),
+                layer({"middleware": {"config": {"a": 1}}}),
+            ],
+        )
+        assert (r.values["middleware.config"], r.sources["middleware.config"]) == (
+            Section({"a": 1}),
+            "file",
+        )
+
+    def test_the_first_layer_with_it_wins_whole(self) -> None:
+        first = control({"middleware": {"config": {"a": 1}}})
+        second = layer({"middleware": {"config": {"a": 2, "b": 2}}})
+        r = make(MW).resolve(environ={}, layers=[first, second])
+        assert r.values["middleware.config"] == Section({"a": 1})  # replaced, never merged
+        assert r.sources["middleware.config"] == "control plane"
+
+    def test_from_its_file_variable(self, tmp_path: Path) -> None:
+        mounted = tmp_path / "mw.yaml"
+        mounted.write_text("auth: {realm: x}\n", encoding="utf-8")
+        items = tmp_path / "reverse.yaml"
+        items.write_text("- {listen: ':80'}\n", encoding="utf-8")
+        environ = {"APP_MIDDLEWARE_CONFIG_FILE": str(mounted), "APP_REVERSE_FILE": str(items)}
+        r = resolve_yaml(
+            tmp_path, "middleware: {config: {other: 1}}\n", MW, REVERSE, environ=environ
+        )
+        assert r.values["middleware.config"] == Section({"auth": {"realm": "x"}})
+        assert r.values["reverse"] == (Section({"listen": ":80"}),)
+        assert dict(r.sources) == {
+            "middleware.config": "APP_MIDDLEWARE_CONFIG_FILE",
+            "reverse": "APP_REVERSE_FILE",
+        }
+        assert r.warnings == ()  # the _FILE variables are known
+
+    def test_an_empty_file_is_an_empty_section(self, tmp_path: Path) -> None:
+        empty = tmp_path / "empty.yaml"
+        empty.write_text("", encoding="utf-8")
+        environ = {"APP_MIDDLEWARE_CONFIG_FILE": str(empty), "APP_REVERSE_FILE": str(empty)}
+        r = make(MW, REVERSE).resolve(DEFAULT, environ)
+        assert (r.values["middleware.config"], r.values["reverse"]) == (Section(), ())
+        assert r.sources["reverse"] == "APP_REVERSE_FILE"
+
+    @pytest.mark.parametrize("expand", [True, False])
+    def test_its_file_expands_with_the_projects_expand(self, tmp_path: Path, expand: bool) -> None:
+        mounted = tmp_path / "mw.yaml"
+        mounted.write_text("url: 'http://${HOST}:80'\n", encoding="utf-8")
+        settings = Settings("APP_", (MW,), default_path=DEFAULT, expand=expand)
+        environ = {"APP_MIDDLEWARE_CONFIG_FILE": str(mounted), "HOST": "h"}
+        value = settings.resolve(DEFAULT, environ).section("middleware.config")
+        assert value["url"] == ("http://h:80" if expand else "http://${HOST}:80")
+
+    def test_an_unreadable_file_variable_is_an_error(self, tmp_path: Path) -> None:
+        missing = tmp_path / "missing.yaml"
+        missing.write_text("a: 1\n", encoding="utf-8")  # the control: readable, it is read
+        r = make(MW).resolve(DEFAULT, {"APP_MIDDLEWARE_CONFIG_FILE": str(missing)})
+        assert r.section("middleware.config") == Section({"a": 1})
+        missing.unlink()
+        with pytest.raises(ConfigError) as info:
+            make(MW).resolve(DEFAULT, {"APP_MIDDLEWARE_CONFIG_FILE": str(missing)})
+        assert str(info.value) == (
+            f"cannot read APP_MIDDLEWARE_CONFIG_FILE ({missing}): No such file or directory"
+        )
+
+    def test_a_file_variable_that_isnt_utf8_is_an_error(self, tmp_path: Path) -> None:
+        bad = tmp_path / "bad.yaml"
+        bad.write_bytes(b"a: " + VALUE.encode() + b"\n")  # the control: UTF-8, it is read
+        r = make(MW).resolve(DEFAULT, {"APP_MIDDLEWARE_CONFIG_FILE": str(bad)})
+        assert r.section("middleware.config") == Section({"a": VALUE})
+        bad.write_bytes(b"a: " + VALUE.encode() + b"\xff\n")
+        with pytest.raises(ConfigError) as info:
+            make(MW).resolve(DEFAULT, {"APP_MIDDLEWARE_CONFIG_FILE": str(bad)})
+        assert str(info.value) == f"cannot read APP_MIDDLEWARE_CONFIG_FILE ({bad}): not UTF-8"
+        assert VALUE not in str(info.value)
+
+    def test_a_file_variable_that_isnt_yaml_names_the_variable_never_the_text(
+        self, tmp_path: Path
+    ) -> None:
+        bad = tmp_path / "bad.yaml"
+        bad.write_text(f"a: [{VALUE}\n", encoding="utf-8")
+        with pytest.raises(ConfigError) as info:
+            make(MW).resolve(DEFAULT, {"APP_MIDDLEWARE_CONFIG_FILE": str(bad)})
+        message = str(info.value)
+        assert message.startswith(f"cannot parse APP_MIDDLEWARE_CONFIG_FILE ({bad}) at line ")
+        assert VALUE not in message
+
+    @pytest.mark.parametrize(
+        ("setting", "text", "expected"),
+        [
+            (MW, "- a\n", "expected a section (a mapping), got a list"),
+            (MW, "just text\n", "expected a section (a mapping), got str"),
+            (REVERSE, "a: 1\n", "expected a list of sections (mappings), got a mapping"),
+        ],
+    )
+    def test_a_file_variable_of_the_wrong_shape_is_an_error(
+        self, tmp_path: Path, setting: Setting, text: str, expected: str
+    ) -> None:
+        mounted = tmp_path / "s.yaml"
+        mounted.write_text(text, encoding="utf-8")
+        var = f"APP_{setting.key.upper().replace('.', '_')}_FILE"
+        with pytest.raises(ConfigError) as info:
+            make(setting).resolve(DEFAULT, {var: str(mounted)})
+        assert str(info.value) == f"{setting.key}: {expected} (from {var} ({mounted}))"
+
+    @pytest.mark.parametrize("with_file", [False, True])
+    def test_a_plain_variable_is_an_error_saying_to_use_file(
+        self, tmp_path: Path, with_file: bool
+    ) -> None:
+        environ = {"APP_MIDDLEWARE_CONFIG": "{auth: {}}"}
+        if with_file:  # set beside a _FILE, it is still a mistake, never silently ignored
+            mounted = tmp_path / "mw.yaml"
+            mounted.write_text("{}\n", encoding="utf-8")
+            environ["APP_MIDDLEWARE_CONFIG_FILE"] = str(mounted)
+        with pytest.raises(ConfigError) as info:
+            make(MW).resolve(DEFAULT, environ)
+        assert str(info.value) == (
+            "middleware.config: APP_MIDDLEWARE_CONFIG is set, but a section is read from a YAML "
+            "file, never a variable: set APP_MIDDLEWARE_CONFIG_FILE to the file's path"
+        )
+
+    def test_a_plain_variable_for_a_list_section_is_an_error_too(self) -> None:
+        with pytest.raises(ConfigError, match="APP_REVERSE is set, but a section is read"):
+            make(REVERSE).resolve(DEFAULT, {"APP_REVERSE": "a,b"})
+
+
+class TestSectionShape:
+    @pytest.mark.parametrize(
+        ("setting", "data", "expected"),
+        [
+            (
+                MW,
+                {"middleware": {"config": "x"}},
+                "middleware.config: expected a section (a mapping), got str",
+            ),
+            (
+                MW,
+                {"middleware": {"config": [1]}},
+                "middleware.config: expected a section (a mapping), got a list",
+            ),
+            (
+                REVERSE,
+                {"reverse": {"a": 1}},
+                "reverse: expected a list of sections (mappings), got a mapping",
+            ),
+            (
+                REVERSE,
+                {"reverse": "a,b"},
+                "reverse: expected a list of sections (mappings), got str",
+            ),
+            (
+                REVERSE,
+                {"reverse": [{"a": 1}, "x"]},
+                "reverse[1]: expected a section (a mapping), got str",
+            ),
+            (REVERSE, {"reverse": [[1]]}, "reverse[0]: expected a section (a mapping), got a list"),
+        ],
+    )
+    def test_the_wrong_shape_is_an_error(
+        self, setting: Setting, data: Mapping[str, Any], expected: str
+    ) -> None:
+        with pytest.raises(ConfigError) as info:
+            make(setting).resolve(environ={}, layers=[layer(data)])
+        assert str(info.value) == f"{expected} (from {ETC})"
+
+    @pytest.mark.parametrize(
+        ("setting", "text", "path", "kind"),
+        [
+            (MW, "middleware: {config: {on: 1}}\n", "middleware.config.true", "bool"),
+            (MW, "middleware: {config: {a: {1: x}}}\n", "middleware.config.a.1", "int"),
+            (
+                MW,
+                "middleware: {config: {a: [{b: [{null: x}]}]}}\n",
+                "middleware.config.a[0].b[0].null",
+                "NoneType",
+            ),
+            (REVERSE, "reverse: [{a: 1}, {no: 1}]\n", "reverse[1].false", "bool"),
+        ],
+    )
+    def test_a_non_string_key_is_an_error_naming_its_path(
+        self, tmp_path: Path, setting: Setting, text: str, path: str, kind: str
+    ) -> None:
+        with pytest.raises(ConfigError) as info:
+            resolve_yaml(tmp_path, text, setting)
+        assert str(info.value) == (
+            f"{path}: a section's keys are strings, and this one is {kind}: quote it "
+            f"(from {tmp_path / 'config.yaml'})"
+        )
+
+    @pytest.mark.parametrize(
+        ("text", "kind"),
+        [("x: !!binary aGk=\n", "bytes"), ("x: !!set {a: null}\n", "set")],
+    )
+    def test_a_value_yaml_types_as_something_else_is_an_error(
+        self, tmp_path: Path, text: str, kind: str
+    ) -> None:
+        config = "middleware:\n  config:\n    " + text.replace("\n", "\n    ").rstrip() + "\n"
+        with pytest.raises(ConfigError) as info:
+            resolve_yaml(tmp_path, config, MW)
+        assert str(info.value) == (
+            f"middleware.config.x: a section holds mappings, lists and scalars, not {kind} "
+            f"(from {tmp_path / 'config.yaml'})"
+        )
+
+    def test_a_project_layers_tuples_and_sections_are_accepted(self) -> None:
+        data = {"middleware": {"config": {"t": ("a", {"b": 1}), "s": Section({"c": 2})}}}
+        r = make(MW).resolve(environ={}, layers=[layer(data)])
+        assert r.section("middleware.config") == Section({"t": ["a", {"b": 1}], "s": {"c": 2}})
+
+    def test_a_layer_is_never_changed_or_kept(self) -> None:
+        data: dict[str, Any] = {"middleware": {"config": {"a": [1], "b": {"c": 1}}}}
+        r = make(MW).resolve(environ={}, layers=[layer(data)])
+        data["middleware"]["config"]["a"].append(2)
+        data["middleware"]["config"]["b"]["c"] = 2
+        assert r.section("middleware.config") == Section({"a": [1], "b": {"c": 1}})
+        assert data == {"middleware": {"config": {"a": [1, 2], "b": {"c": 2}}}}
+
+    def test_expansion_reaches_every_leaf_but_no_key(self, tmp_path: Path) -> None:
+        text = "middleware: {config: {'${K}': {url: 'http://${HOST}', l: ['${HOST}', 1]}}}\n"
+        r = resolve_expanding(tmp_path, text, MW, environ={"HOST": "h", "K": "k"})
+        assert r.section("middleware.config") == Section(
+            {"${K}": {"url": "http://h", "l": ["h", 1]}}
+        )
+
+    def test_expansion_in_a_project_layers_tuple(self) -> None:
+        data = {"middleware": {"config": {"t": ("${HOST}",)}}}
+        r = make(MW).resolve(environ={"HOST": "h"}, layers=[layer(data, expand=True)])
+        assert r.section("middleware.config")["t"] == ("h",)
+
+
+class TestSectionAccessors:
+    def resolved(self) -> Resolved:
+        data = {"middleware": {"config": {"a": 1}}, "reverse": [{"l": ":80"}]}
+        return make(MW, REVERSE, *KINDS).resolve(
+            environ={"APP_L": "a,b", "APP_K": VALUE}, layers=[layer(data)]
+        )
+
+    def test_section_and_sections_give_their_kind(self) -> None:
+        r = self.resolved()
+        assert r.section("middleware.config") == Section({"a": 1})
+        assert r.sections("reverse") == (Section({"l": ":80"}),)
+
+    def test_empty_values_keep_their_kind(self) -> None:
+        r = make(MW, REVERSE, Setting("l", "", "", is_list=True)).resolve(DEFAULT, {})
+        assert r.section("middleware.config") == Section()
+        assert r.sections("reverse") == ()
+        assert r.list("l") == ()
+        # An empty list section's () is not an empty list setting's, nor the reverse.
+        with pytest.raises(TypeError, match=r"^'reverse' is a list of sections setting, not list"):
+            r.list("reverse")
+        with pytest.raises(TypeError, match=r"^'l' is a list setting, not list of sections$"):
+            r.sections("l")
+
+    @pytest.mark.parametrize(
+        ("accessor", "key", "message"),
+        [
+            ("section", "s", "'s' is a str setting, not section"),
+            ("section", "l", "'l' is a list setting, not section"),
+            (
+                "section",
+                "reverse",
+                "'reverse' is a list of sections setting, not section: use sections()",
+            ),
+            ("section", "k", "'k' is a secret setting, not section: use secret() and reveal()"),
+            ("sections", "l", "'l' is a list setting, not list of sections"),
+            ("sections", "i", "'i' is a int setting, not list of sections"),
+            (
+                "sections",
+                "middleware.config",
+                "'middleware.config' is a section setting, not list of sections: use section()",
+            ),
+            (
+                "str",
+                "middleware.config",
+                "'middleware.config' is a section setting, not str: use section()",
+            ),
+            (
+                "list",
+                "reverse",
+                "'reverse' is a list of sections setting, not list: use sections()",
+            ),
+            (
+                "list",
+                "middleware.config",
+                "'middleware.config' is a section setting, not list: use section()",
+            ),
+            (
+                "secret",
+                "middleware.config",
+                "'middleware.config' is a section setting, not secret: use section()",
+            ),
+            ("int", "reverse", "'reverse' is a list of sections setting, not int: use sections()"),
+            (
+                "bool",
+                "middleware.config",
+                "'middleware.config' is a section setting, not bool: use section()",
+            ),
+        ],
+    )
+    def test_another_kind_is_a_type_error_naming_the_key(
+        self, accessor: str, key: str, message: str
+    ) -> None:
+        with pytest.raises(TypeError) as info:
+            getattr(self.resolved(), accessor)(key)
+        assert str(info.value) == message
+
+    def test_a_hand_built_resolved_knows_a_section_by_its_value(self) -> None:
+        r = Resolved(values={"s": Section({"a": 1}), "l": (Section(),)}, sources={})
+        assert r.section("s") == Section({"a": 1})
+        assert r.sections("l") == (Section(),)
+
+    @pytest.mark.parametrize("accessor", ["section", "sections"])
+    def test_a_missing_key_is_a_key_error(self, accessor: str) -> None:
+        with pytest.raises(KeyError):
+            getattr(self.resolved(), accessor)("nope")
+
+
+class TestSectionChecks:
+    def test_the_check_receives_the_section(self) -> None:
+        seen: list[Value] = []
+        mw = Setting("mw", "", "", is_section=True, check=lambda v: seen.append(v))
+        items = Setting(
+            "items", "", "", is_section=True, is_list=True, check=lambda v: seen.append(v)
+        )
+        make(mw, items).resolve(environ={}, layers=[layer({"mw": {"a": 1}, "items": [{"b": 2}]})])
+        assert seen == [Section({"a": 1}), (Section({"b": 2}),)]
+
+    def test_the_check_runs_on_the_default_too(self) -> None:
+        seen: list[Value] = []
+        make(Setting("mw", "", "", is_section=True, check=seen.append)).resolve(DEFAULT, {})
+        assert seen == [Section()]
+
+    def test_the_check_may_replace_it(self) -> None:
+        def defaults(value: Value) -> Value:
+            assert isinstance(value, Section)
+            return Section({"timeout": 5, **value})
+
+        def first_only(value: Value) -> Value:
+            assert isinstance(value, tuple)
+            return value[:1]
+
+        mw = Setting("mw", "", "", is_section=True, check=defaults)
+        items = Setting("items", "", "", is_section=True, is_list=True, check=first_only)
+        r = make(mw, items).resolve(
+            environ={}, layers=[layer({"mw": {"a": 1}, "items": [{"b": 1}, {"b": 2}]})]
+        )
+        assert r.section("mw") == Section({"timeout": 5, "a": 1})
+        assert r.sections("items") == (Section({"b": 1}),)
+
+    @pytest.mark.parametrize(
+        ("is_list", "returned", "message"),
+        [
+            (False, {"a": 1}, "mw: its check returned dict, expected Section"),
+            (False, (Section(),), "mw: its check returned tuple, expected Section"),
+            (True, [Section()], "mw: its check returned list, expected a tuple of Section"),
+            (True, ({"a": 1},), "mw: its check returned tuple, expected a tuple of Section"),
+            (True, Section(), "mw: its check returned Section, expected a tuple of Section"),
+        ],
+    )
+    def test_a_replacement_of_another_kind_is_an_error(
+        self, is_list: bool, returned: object, message: str
+    ) -> None:
+        mw = Setting("mw", "", "", is_section=True, is_list=is_list, check=lambda v: returned)  # type: ignore[arg-type,return-value]  # the point: a wrong type
+        with pytest.raises(ConfigError) as info:
+            make(mw).resolve(DEFAULT, {})
+        assert str(info.value) == message
+
+    def test_a_check_error_names_the_key_and_where(self) -> None:
+        def needs_auth(value: Value) -> None:
+            raise ValueError("needs an auth entry")
+
+        mw = Setting("mw", "", "", is_section=True, check=needs_auth)
+        with pytest.raises(ConfigError) as info:
+            make(mw).resolve(environ={}, layers=[layer({"mw": {"a": 1}})])
+        assert str(info.value) == f"mw: needs an auth entry (from {ETC})"
+        with pytest.raises(ConfigError) as info:
+            make(mw).resolve(DEFAULT, {})
+        assert str(info.value) == "mw: needs an auth entry"
+
+    def test_a_check_error_masks_every_secret_leaf(self, tmp_path: Path) -> None:
+        token = secret_file(tmp_path)
+        other = secret_file(tmp_path, 'it\'s\\ "quoted"\n', name="other")
+
+        def leaky(value: Value) -> None:
+            assert isinstance(value, Section)
+            deep: Any = value
+            revealed = [s.reveal() for s in (deep["a"]["t"], deep["l"][0])]
+            raise ValueError(f"bad {revealed[0]} and {revealed!r} and {value!r}")
+
+        mw = Setting("mw", "", "", is_section=True, check=leaky)
+        text = f"mw: {{a: {{t: {{secret_file: {token}}}}}, l: [{{secret_file: {other}}}, 1]}}\n"
+        with pytest.raises(ConfigError) as info:
+            resolve_yaml(tmp_path, text, mw)
+        message = str(info.value)
+        assert VALUE not in message
+        assert "quoted" not in message
+        assert message.startswith(f"mw: bad {MASK} and ['{MASK}', ")
+
+    def test_a_check_error_shows_expanded_leaves_as_written(self, tmp_path: Path) -> None:
+        def bad_url(value: Value) -> None:
+            assert isinstance(value, Section)
+            raise ValueError(f"bad url {value['url']!r} in {value['l']!r}")
+
+        mw = Setting("mw", "", "", is_section=True, check=bad_url)
+        text = "mw: {url: 'https://u:${PASS}@h', l: ['${PASS}'], n: 1, s: plain}\n"
+        with pytest.raises(ConfigError) as info:
+            resolve_expanding(tmp_path, text, mw, environ={"PASS": VALUE})
+        message = str(info.value)
+        assert VALUE not in message
+        assert message == (
+            "mw: bad url 'https://u:${PASS}@h' in ('${PASS}',) "
+            f"(from {tmp_path / 'config.yaml'})"
+        )
+
+
+class TestSectionUnknownKeys:
+    def test_nothing_below_a_section_is_checked_but_a_typo_beside_it_is(self) -> None:
+        data = {"middleware": {"config": {"anything": {"at": ["all"]}}, "confg": {"x": 1}}}
+        assert warnings_of(make(MW), layer(data)) == [
+            f"unknown key 'middleware.confg' in {ETC}: did you mean 'middleware.config'?"
+        ]
+
+    def test_nor_below_a_list_section_or_a_sections_alias(self) -> None:
+        moved = Setting("mw", "", "", is_section=True, aliases=("old.mw",))
+        data = {"reverse": [{"x": 1}], "old": {"mw": {"y": 1}}}
+        r = make(REVERSE, moved).resolve(environ={}, layers=[layer(data)])
+        assert [(w.kind, w.name) for w in r.warnings] == [("alias", "old.mw")]
+
+    def test_its_variables_are_known(self, tmp_path: Path) -> None:
+        mounted = tmp_path / "mw.yaml"
+        mounted.write_text("{}\n", encoding="utf-8")
+        r = make(MW).resolve(
+            DEFAULT, {"APP_MIDDLEWARE_CONFIG_FILE": str(mounted), "APP_MIDDLEWARE_CONFG_FILE": ""}
+        )
+        assert [w.name for w in r.warnings] == ["APP_MIDDLEWARE_CONFG_FILE"]
+        assert (r.section("middleware.config"), r.sources["middleware.config"]) == (
+            Section(),
+            "APP_MIDDLEWARE_CONFIG_FILE",
+        )
+
+
+class TestSectionAliases:
+    MOVED = Setting("mw", "", "", is_section=True, aliases=("middleware",))
+
+    def test_an_alias_is_read_with_a_warning(self) -> None:
+        r = make(self.MOVED).resolve(environ={}, layers=[layer({"middleware": {"a": 1}})])
+        assert r.section("mw") == Section({"a": 1})
+        assert r.warnings == (alias_warning("middleware", ETC, "mw"),)
+
+    def test_an_aliass_file_variable_is_read(self, tmp_path: Path) -> None:
+        mounted = tmp_path / "mw.yaml"
+        mounted.write_text("a: 1\n", encoding="utf-8")
+        r = make(self.MOVED).resolve(DEFAULT, {"APP_MIDDLEWARE_FILE": str(mounted)})
+        assert (r.section("mw"), r.sources["mw"]) == (Section({"a": 1}), "APP_MIDDLEWARE_FILE")
+
+    def test_an_aliass_plain_variable_is_an_error(self) -> None:
+        with pytest.raises(ConfigError, match="mw: APP_MIDDLEWARE is set, but a section"):
+            make(self.MOVED).resolve(DEFAULT, {"APP_MIDDLEWARE": "x"})
+
+    def test_equal_sections_at_one_level_are_fine(self, tmp_path: Path) -> None:
+        token = secret_file(tmp_path)
+        again = secret_file(tmp_path, VALUE, name="again")  # the same secret, another file
+        data = {
+            "mw": {"a": [1, {"t": {"secret_file": str(token)}}]},
+            "middleware": {"a": [1, {"t": {"secret_file": str(again)}}]},
+        }
+        r = make(self.MOVED).resolve(environ={}, layers=[layer(data, secret_files=True)])
+        assert r.section("mw") == Section({"a": [1, {"t": Secret(VALUE)}]})
+
+    @pytest.mark.parametrize("old", [{"a": 2}, {"a": True}, {"a": 1, "b": 1}, {"a": 1.0}])
+    def test_different_sections_at_one_level_are_an_error(self, old: dict[str, Any]) -> None:
+        data = {"mw": {"a": 1}, "middleware": old}
+        with pytest.raises(ConfigError) as info:
+            make(self.MOVED).resolve(environ={}, layers=[layer(data)])
+        assert str(info.value) == (
+            f"mw: set as both 'mw' and its old name 'middleware' (from {ETC}), to different values"
+        )
+
+    def test_different_secret_leaves_at_one_level_are_an_error_never_shown(
+        self, tmp_path: Path
+    ) -> None:
+        token = secret_file(tmp_path)
+        other = secret_file(tmp_path, "other", name="other")
+        data = {
+            "mw": {"t": {"secret_file": str(token)}},
+            "middleware": {"t": {"secret_file": str(other)}},
+        }
+        with pytest.raises(ConfigError, match=r"to different values$") as info:
+            make(self.MOVED).resolve(environ={}, layers=[layer(data, secret_files=True)])
+        assert VALUE not in str(info.value)
+
+    def test_an_aliass_secret_leaf_in_a_remote_layer_is_refused(self, tmp_path: Path) -> None:
+        token = secret_file(tmp_path)
+        data = {"mw": {"a": 1}, "middleware": {"t": {"secret_file": str(token)}}}
+        with pytest.raises(ConfigError, match="read only from local configuration"):
+            make(self.MOVED).resolve(environ={}, layers=[control(data)])
+
+
+class TestSecretLeaves:
+    def test_a_leaf_is_read_as_a_secret_newline_stripped(self, tmp_path: Path) -> None:
+        token = secret_file(tmp_path)
+        text = (
+            f"middleware:\n  config:\n    auth: {{token: {{secret_file: {token}}}}}\n"
+            f"    keys: [{{secret_file: {token}}}, plain]\n"
+        )
+        value = resolve_yaml(tmp_path, text, MW).section("middleware.config")
+        leaf = cast(Any, value)["auth"]["token"]
+        assert isinstance(leaf, Secret)
+        assert leaf.reveal() == VALUE
+        assert value["keys"] == (Secret(VALUE), "plain")
+        assert VALUE not in repr(value)
+
+    def test_a_leaf_in_a_list_sections_item(self, tmp_path: Path) -> None:
+        token = secret_file(tmp_path)
+        text = f"reverse: [{{listen: ':80', auth: {{secret_file: {token}}}}}]\n"
+        items = resolve_yaml(tmp_path, text, REVERSE).sections("reverse")
+        assert items == (Section({"listen": ":80", "auth": Secret(VALUE)}),)
+
+    def test_a_leaf_in_a_sections_file_variable(self, tmp_path: Path) -> None:
+        token = secret_file(tmp_path)
+        mounted = tmp_path / "mw.yaml"
+        mounted.write_text(f"auth: {{secret_file: {token}}}\n", encoding="utf-8")
+        r = make(MW).resolve(DEFAULT, {"APP_MIDDLEWARE_CONFIG_FILE": str(mounted)})
+        assert r.section("middleware.config") == Section({"auth": Secret(VALUE)})
+
+    def test_a_project_layer_with_secret_files_reads_leaves(self, tmp_path: Path) -> None:
+        token = secret_file(tmp_path)
+        data = {"middleware": {"config": {"t": {"secret_file": str(token)}}}}
+        r = make(MW).resolve(environ={}, layers=[layer(data, secret_files=True)])
+        assert r.section("middleware.config") == Section({"t": Secret(VALUE)})
+
+    def test_only_an_exact_leaf_is_one(self, tmp_path: Path) -> None:
+        token = secret_file(tmp_path)
+        data = {"middleware": {"config": {"t": {"secret_file": str(token), "mode": "x"}}}}
+        r = make(MW).resolve(environ={}, layers=[control(data)])  # not a leaf: never refused
+        assert r.section("middleware.config") == Section(
+            {"t": {"secret_file": str(token), "mode": "x"}}
+        )
+
+    def test_a_trailing_whitespace_is_stripped_as_for_file(self, tmp_path: Path) -> None:
+        token = secret_file(tmp_path, f"  {VALUE} \r\n\n")
+        data = {"mw": {"t": {"secret_file": str(token)}}}
+        mw = Setting("mw", "", "", is_section=True)
+        r = make(mw).resolve(environ={}, layers=[layer(data, secret_files=True)])
+        assert r.section("mw")["t"] == Secret(f"  {VALUE}")
+
+    def test_an_unreadable_file_names_the_path_and_file(self, tmp_path: Path) -> None:
+        missing = tmp_path / "missing"
+        text = f"middleware: {{config: {{a: [{{t: {{secret_file: {missing}}}}}]}}}}\n"
+        with pytest.raises(ConfigError) as info:
+            resolve_yaml(tmp_path, text, MW)
+        assert str(info.value) == (
+            f"middleware.config.a[0].t: cannot read secret_file {missing}: No such file or "
+            f"directory (from {tmp_path / 'config.yaml'})"
+        )
+
+    def test_a_file_that_isnt_utf8_never_shows_its_contents(self, tmp_path: Path) -> None:
+        bad = tmp_path / "bad"
+        bad.write_bytes(VALUE.encode() + b"\xff")
+        data = {"mw": {"t": {"secret_file": str(bad)}}}
+        mw = Setting("mw", "", "", is_section=True)
+        with pytest.raises(ConfigError) as info:
+            make(mw).resolve(environ={}, layers=[layer(data, secret_files=True)])
+        assert str(info.value) == f"mw.t: cannot read secret_file {bad}: not UTF-8 (from {ETC})"
+        assert VALUE not in str(info.value)
+
+    @pytest.mark.parametrize("path", [1, "", None, ["a"]])
+    def test_a_path_that_isnt_one_is_an_error(self, path: object) -> None:
+        data = {"mw": {"t": {"secret_file": path}}}
+        mw = Setting("mw", "", "", is_section=True)
+        with pytest.raises(ConfigError) as info:
+            make(mw).resolve(environ={}, layers=[layer(data, secret_files=True)])
+        assert str(info.value) == f"mw.t.secret_file: expected a file's path (from {ETC})"
+
+    @pytest.mark.parametrize("is_list", [False, True])
+    def test_a_section_or_item_cant_itself_be_a_leaf(self, tmp_path: Path, is_list: bool) -> None:
+        token = secret_file(tmp_path)
+        leaf = {"secret_file": str(token)}
+        mw = Setting("mw", "", "", is_section=True, is_list=is_list)
+        data = {"mw": [leaf] if is_list else leaf}
+        path = "mw[0]" if is_list else "mw"
+        with pytest.raises(ConfigError) as info:
+            make(mw).resolve(environ={}, layers=[layer(data, secret_files=True)])
+        assert str(info.value) == (
+            f"{path}: a section is a mapping, so a secret_file leaf goes under a key in it "
+            f"(from {ETC})"
+        )
+
+    @pytest.mark.parametrize("expand", [True, False])
+    def test_a_path_expands_only_where_the_layer_does(self, tmp_path: Path, expand: bool) -> None:
+        secret_file(tmp_path)
+        text = "middleware: {config: {t: {secret_file: '${DIR}/token'}}}\n"
+        environ = {"DIR": str(tmp_path)}
+        if expand:
+            r = resolve_expanding(tmp_path, text, MW, environ=environ)
+            assert r.section("middleware.config")["t"] == Secret(VALUE)
+        else:
+            with pytest.raises(ConfigError, match=r"cannot read secret_file \$\{DIR\}/token: No"):
+                resolve_yaml(tmp_path, text, MW, environ=environ)
+
+
+class TestSecretLeavesFromRemoteLayers:
+    """Design 0009, decision E: a control-plane payload never makes this process read a file."""
+
+    @pytest.fixture
+    def opened(self, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+        """Every path opened for reading while the test runs, by any of the usual routes."""
+        paths: list[str] = []
+        real_read_text, real_open, real_builtin_open = Path.read_text, Path.open, open
+
+        def read_text(self: Path, *args: Any, **kwargs: Any) -> str:
+            paths.append(str(self))
+            return real_read_text(self, *args, **kwargs)
+
+        def path_open(self: Path, *args: Any, **kwargs: Any) -> Any:
+            paths.append(str(self))
+            return real_open(self, *args, **kwargs)
+
+        def builtin_open(file: Any, *args: Any, **kwargs: Any) -> Any:
+            paths.append(str(file))
+            return real_builtin_open(file, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", read_text)
+        monkeypatch.setattr(Path, "open", path_open)
+        monkeypatch.setattr("builtins.open", builtin_open)
+        return paths
+
+    @staticmethod
+    def token(tmp_path: Path, opened: list[str]) -> Path:
+        """An existing, readable secret file; writing it isn't reading it."""
+        token = secret_file(tmp_path)
+        opened.clear()
+        return token
+
+    @pytest.mark.parametrize(
+        ("data", "path"),
+        [
+            (
+                {"middleware": {"config": {"auth": {"secret_file": "TOKEN"}}}},
+                "middleware.config.auth",
+            ),
+            (
+                {"middleware": {"config": {"a": [{"b": {"secret_file": "TOKEN"}}]}}},
+                "middleware.config.a[0].b",
+            ),
+            ({"middleware": {"config": {"secret_file": "TOKEN"}}}, "middleware.config"),
+        ],
+    )
+    def test_a_leaf_in_a_control_plane_layer_is_refused_and_never_read(
+        self, tmp_path: Path, opened: list[str], data: dict[str, Any], path: str
+    ) -> None:
+        token = self.token(tmp_path, opened)
+        payload = _replace_leaf(data, str(token))
+        with pytest.raises(ConfigError) as info:
+            make(MW).resolve(environ={}, layers=[control(payload)])
+        assert str(info.value) == (
+            f"{path}: secret files are read only from local configuration (the config file or a "
+            f"section's _FILE), not from {CONTROL}"
+        )
+        assert str(token) not in opened
+        assert VALUE not in str(info.value)
+
+    def test_in_a_list_sections_item_too(self, tmp_path: Path, opened: list[str]) -> None:
+        token = self.token(tmp_path, opened)
+        payload = {"reverse": [{"auth": {"secret_file": str(token)}}]}
+        with pytest.raises(ConfigError, match=r"^reverse\[0\]\.auth: secret files are read only"):
+            make(REVERSE).resolve(environ={}, layers=[control(payload)])
+        assert str(token) not in opened
+
+    def test_even_in_a_layer_that_expands(self, tmp_path: Path, opened: list[str]) -> None:
+        token = self.token(tmp_path, opened)
+        payload = {"middleware": {"config": {"t": {"secret_file": "${DIR}/token"}}}}
+        with pytest.raises(ConfigError, match="read only from local configuration"):
+            make(MW).resolve(environ={"DIR": str(tmp_path)}, layers=[control(payload, expand=True)])
+        assert str(token) not in opened
+
+    def test_above_the_local_file_it_is_still_refused(
+        self, tmp_path: Path, opened: list[str]
+    ) -> None:
+        # mitm-proxy's managed mode: the payload first, then the local file.
+        token = self.token(tmp_path, opened)
+        config = tmp_path / "config.yaml"
+        config.write_text(
+            f"middleware: {{config: {{t: {{secret_file: {token}}}}}}}\n", encoding="utf-8"
+        )
+        settings = make(MW)
+        payload = {"middleware": {"config": {"t": {"secret_file": str(token)}}}}
+        with pytest.raises(ConfigError, match="read only from local configuration"):
+            settings.resolve(environ={}, layers=[control(payload), settings.read_file(config, {})])
+        assert str(token) not in opened
+        # The control: from the local file alone, the same leaf is read.
+        r = settings.resolve(environ={}, layers=[control({}), settings.read_file(config, {})])
+        assert r.section("middleware.config") == Section({"t": Secret(VALUE)})
+        assert str(token) in opened
+
+
+def _replace_leaf(node: Any, path: str) -> Any:
+    """`node` with each `"TOKEN"` replaced by `path`."""
+    if isinstance(node, dict):
+        return {k: _replace_leaf(v, path) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_replace_leaf(v, path) for v in node]
+    return path if node == "TOKEN" else node
+
+
+class TestSectionReload:
+    def test_each_resolve_reads_leaves_afresh(self, tmp_path: Path) -> None:
+        token = secret_file(tmp_path)
+        settings = make(MW)
+        config = tmp_path / "config.yaml"
+        config.write_text(
+            f"middleware: {{config: {{t: {{secret_file: {token}}}, n: [1]}}}}\n", encoding="utf-8"
+        )
+        first = settings.resolve(config, {}).section("middleware.config")
+        again = settings.resolve(config, {}).section("middleware.config")
+        assert first == again and hash(first) == hash(again)
+        assert first is not again
+        token.write_text("rotated\n", encoding="utf-8")
+        rotated = settings.resolve(config, {}).section("middleware.config")
+        assert rotated["t"] == Secret("rotated")
+        assert rotated != first

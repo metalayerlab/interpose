@@ -66,6 +66,22 @@ The project expands `${VAR}` in its config file, and a value has a `${` that isn
 
 The project doesn't expand variables in its config file (`Settings(expand=...)` is off by default), or the value came from an environment variable, a `_FILE` or a project-built layer, which never expand.
 
+### "middleware.config: MYAPP_MIDDLEWARE_CONFIG is set, but a section is read from a YAML file, never a variable: ..."
+
+The setting is a section (a YAML subtree), which can't be written in one environment variable. Put it in the config file, or in a YAML file named by `MYAPP_MIDDLEWARE_CONFIG_FILE`, and unset the plain variable: it is an error even beside the `_FILE`.
+
+### "middleware.config.auth: secret files are read only from local configuration (the config file or a section's _FILE), not from control plane ..."
+
+A section from a remote layer, such as a control plane's managed configuration, holds a `{secret_file: ...}` leaf. interpose never reads a file a remote payload names. Move the secret leaf to the local config file or the section's `_FILE`, or have the control plane send something the project resolves itself.
+
+### "middleware.config.auth: cannot read secret_file /run/secrets/x: No such file or directory"
+
+A secret leaf names a file that is missing or unreadable by the process's user. A relative path is relative to the working directory. The message never shows the file's contents.
+
+### "middleware.config.true: a section's keys are strings, and this one is bool: quote it"
+
+YAML reads `on`, `no`, `null`, `1` and the like as a bool, `None` or a number, and a section's keys must be strings. Quote the key: `"on": ...`.
+
 ### A secret shows as `********` where its value is needed
 
 The code called `str()` on the `Secret`. Call `reveal()` at the point of use.
