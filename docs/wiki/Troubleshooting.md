@@ -38,7 +38,13 @@ The config file is a list or a single value. Its top level must be `key: value` 
 
 ### A setting in the config file is ignored
 
-Something earlier in the lookup order is set: a `_FILE` or environment variable for the same key. The source says which. A key spelled wrongly, or nested under the wrong parent, is ignored too.
+Something earlier in the lookup order is set: a `_FILE` or environment variable for the same key. The source says which.
+
+A key spelled wrongly, or nested under the wrong parent, is ignored too, and gives a warning on `Resolved.warnings`, such as `unknown key 'listen.prot' in /etc/myapp/config.yaml: did you mean 'listen.port'?`. A misspelt prefixed variable does the same: `unknown variable 'MYAPP_LISTEN_PROT' in the environment: ...`. interpose doesn't log warnings itself; if you see none, check that the project logs them.
+
+### "unknown variable 'MYAPP_...' in the environment" for a variable the project reads
+
+The project reads that prefixed variable itself, outside its settings. Name it in `Settings(..., extra_env=("MYAPP_...",))`.
 
 ### A secret shows as `********` where its value is needed
 

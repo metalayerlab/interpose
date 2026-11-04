@@ -14,6 +14,7 @@ import pytest
 from interpose.secret import MASK, Secret
 from interpose.settings import (
     ConfigError,
+    ConfigWarning,
     Layer,
     Resolved,
     Setting,
@@ -466,6 +467,219 @@ class TestLayers:
 
 
 LIST_SETTING = Setting("hosts", "", "", is_list=True)
+
+
+# --- unknown keys and variables (design 0009, step 2) ------------------------------------------
+
+
+def warnings_of(
+    settings: Settings, *layers: Layer, environ: Mapping[str, str] | None = None
+) -> list[str]:
+    return [str(w) for w in settings.resolve(environ=environ or {}, layers=list(layers)).warnings]
+
+
+class TestUnknownKeys:
+    def test_a_clean_config_has_no_warnings(self, tmp_path: Path) -> None:
+        r = resolve_yaml(tmp_path, "listen:\n  port: 1\n", PORT, environ={"APP_LISTEN_PORT": "2"})
+        assert r.warnings == ()
+        assert make(PORT).resolve(DEFAULT, {}).warnings == ()
+
+    def test_unknown_top_level_key(self, tmp_path: Path) -> None:
+        r = resolve_yaml(tmp_path, "listen:\n  port: 1\nverbose: true\n", PORT)
+        assert r.values["listen.port"] == 1
+        path = tmp_path / "config.yaml"
+        assert r.warnings == (
+            ConfigWarning("unknown", "verbose", f"unknown key 'verbose' in {path}"),
+        )
+
+    def test_nested_typo_is_reported_with_a_suggestion(self, tmp_path: Path) -> None:
+        settings = Settings("SLUICE_", (PORT,), default_path=DEFAULT)
+        r = settings.resolve(
+            environ={}, layers=[layer({"listen": {"prot": 1}}, where="/etc/sluice/config.yaml")]
+        )
+        assert r.values["listen.port"] == 8080  # still ignored for resolution
+        assert len(r.warnings) == 1
+        (w,) = r.warnings
+        assert (w.kind, w.name) == ("unknown", "listen.prot")
+        assert str(w) == (
+            "unknown key 'listen.prot' in /etc/sluice/config.yaml: did you mean 'listen.port'?"
+        )
+
+    def test_reported_once_at_the_first_unknown_level(self) -> None:
+        data = {"listne": {"port": 1, "host": {"name": "x"}}, "listen": {"backlog": {"n": 1}}}
+        assert warnings_of(make(PORT), layer(data)) == [
+            f"unknown key 'listne' in {ETC}: did you mean 'listen'?",
+            f"unknown key 'listen.backlog' in {ETC}",
+        ]
+
+    def test_parents_of_declared_keys_are_known(self) -> None:
+        deep = Setting("a.b.c", "", "")
+        assert warnings_of(make(deep), layer({"a": {"b": {"c": "x"}}})) == []
+        assert warnings_of(make(deep), layer({"a": {"b": None}, "a_": 1})) == [
+            f"unknown key 'a_' in {ETC}"
+        ]
+
+    def test_nothing_below_a_declared_key_or_a_scalar_parent_is_checked(self) -> None:
+        # A mapping under a declared key is a coercion error if read, never an unknown key; a
+        # scalar where a parent mapping belongs means unset, as before.
+        deep = make(Setting("a.b", "", ""), Setting("n", 0, ""))
+        top = layer({"a": "scalar"})
+        lower = layer({"a": {"b": {"stray": 1}}, "zz": 1}, source="lower")
+        r = deep.resolve(environ={"APP_A_B": "v"}, layers=[top, lower])
+        assert [w.name for w in r.warnings] == ["zz"]  # the control: the only one reported
+
+    def test_suggestion_present_and_absent_at_the_cutoff(self) -> None:
+        settings = make(Setting("abcd", "", ""))
+        # "abce" vs "abcd": ratio 0.75, the cutoff, so suggested; "abxy": 0.5, not.
+        assert warnings_of(settings, layer({"abce": 1, "abxy": 2})) == [
+            f"unknown key 'abce' in {ETC}: did you mean 'abcd'?",
+            f"unknown key 'abxy' in {ETC}",
+        ]
+        # "abcdefgh" vs "abcdwxyz" is 0.5; "abcdefgh" vs "abcdefzz" is exactly 0.75.
+        long = make(Setting("abcdefgh", "", ""))
+        assert warnings_of(long, layer({"abcdefzz": 1, "abcdwxyz": 1})) == [
+            f"unknown key 'abcdefzz' in {ETC}: did you mean 'abcdefgh'?",
+            f"unknown key 'abcdwxyz' in {ETC}",
+        ]
+
+    def test_a_non_string_key_is_named_by_its_yaml_text(self, tmp_path: Path) -> None:
+        text = "on: 1\nlisten:\n  1: x\n  null: y\n  port: 2\n"
+        r = resolve_yaml(tmp_path, text, PORT, Setting("one", "", ""))
+        path = tmp_path / "config.yaml"
+        assert [(w.name, str(w)) for w in r.warnings] == [
+            ("true", f"unknown key 'true' in {path}"),
+            ("listen.1", f"unknown key 'listen.1' in {path}"),
+            ("listen.null", f"unknown key 'listen.null' in {path}"),
+        ]
+
+    def test_a_flat_dotted_key_is_unknown(self, tmp_path: Path) -> None:
+        # Resolution reads only nested mappings, so `listen.port:` at the top is ignored.
+        r = resolve_yaml(tmp_path, "listen.port: 1\n", PORT)
+        assert r.values["listen.port"] == 8080
+        assert [w.name for w in r.warnings] == ["listen.port"]
+
+    def test_a_key_yaml_cant_write_is_named_by_its_repr(self) -> None:
+        class Odd:
+            def __repr__(self) -> str:
+                return "Odd()"
+
+        data: dict[Any, Any] = {Odd(): 1}  # only a project-built Layer can hold such a key
+        assert warnings_of(make(PORT), layer(data)) == [f"unknown key 'Odd()' in {ETC}"]
+
+    def test_a_layer_warning_names_its_where_or_origin(self) -> None:
+        payload = Layer(
+            {"listen": {"prot": 1}, "x": 1},
+            source="control plane",
+            where="control plane (config v12)",
+            origins={"listen.prot": "payload.listen.prot"},
+        )
+        local = layer({"y": 1})
+        assert warnings_of(make(PORT), payload, local) == [
+            "unknown key 'listen.prot' in payload.listen.prot: did you mean 'listen.port'?",
+            "unknown key 'x' in control plane (config v12)",
+            f"unknown key 'y' in {ETC}",
+        ]
+
+    def test_no_value_is_in_a_warning(self, tmp_path: Path) -> None:
+        settings = make(PORT, AUTH)
+        text = f"proxy:\n  auht: {VALUE}\n  extra: [{VALUE}]\n"
+        environ = {"APP_PROXY_AHTU": VALUE, "APP_PROXY_AUTH": VALUE}
+        path = tmp_path / "config.yaml"
+        path.write_text(text, encoding="utf-8")
+        r = settings.resolve(path, environ)
+        assert [w.name for w in r.warnings] == ["proxy.auht", "proxy.extra", "APP_PROXY_AHTU"]
+        for w in r.warnings:
+            assert VALUE not in f"{w} {w!r}"
+
+    def test_order_is_deterministic(self) -> None:
+        data = {"b": 1, "listen": {"z": 1, "a": 1}, "a": 1}
+        environ = {"APP_Z": "", "APP_B": "", "APP_A": ""}
+        names = [w.name for w in make(PORT).resolve(environ=environ, layers=[layer(data)]).warnings]
+        # Layers first, in document order; then variables by name.
+        assert names == ["b", "listen.z", "listen.a", "a", "APP_A", "APP_B", "APP_Z"]
+        reordered = dict(reversed(environ.items()))
+        again = make(PORT).resolve(environ=reordered, layers=[layer(data)]).warnings
+        assert [w.name for w in again] == names
+
+    def test_warning_is_frozen_and_its_str_is_the_message(self) -> None:
+        w = ConfigWarning("unknown", "a", "unknown key 'a' in x")
+        assert str(w) == "unknown key 'a' in x"
+        with pytest.raises(AttributeError):
+            w.name = "b"  # type: ignore[misc]  # asserting that frozen=True refuses this
+
+
+class TestUnknownVariables:
+    def test_unknown_prefixed_variable_with_a_suggestion(self) -> None:
+        settings = Settings("SLUICE_", (PORT,), default_path=DEFAULT)
+        r = settings.resolve(environ={"SLUICE_LISTEN_PROT": "1", "OTHER_X": "1"}, layers=[])
+        assert r.values["listen.port"] == 8080
+        assert r.warnings == (
+            ConfigWarning(
+                "unknown",
+                "SLUICE_LISTEN_PROT",
+                "unknown variable 'SLUICE_LISTEN_PROT' in the environment: "
+                "did you mean 'SLUICE_LISTEN_PORT'?",
+            ),
+        )
+
+    def test_without_a_close_match_no_suggestion(self) -> None:
+        assert warnings_of(make(PORT), environ={"APP_QQQ": "1"}) == [
+            "unknown variable 'APP_QQQ' in the environment"
+        ]
+
+    def test_variables_settings_read_are_not_reported(self, tmp_path: Path) -> None:
+        (tmp_path / "port").write_text("1\n", encoding="utf-8")
+        environ = {
+            "APP_LISTEN_PORT": "2",
+            "APP_LISTEN_PORT_FILE": str(tmp_path / "port"),
+            "APP_CONFIG": str(tmp_path / "missing.yaml"),
+            "APP_STRAY": "1",  # the control: the only one reported
+        }
+        assert [w.name for w in make(PORT).resolve(environ=environ).warnings] == ["APP_STRAY"]
+
+    def test_a_file_variable_typo_suggests_the_file_variable(self) -> None:
+        assert warnings_of(make(PORT), environ={"APP_LISTEN_PORT_FIEL": "x"}) == [
+            "unknown variable 'APP_LISTEN_PORT_FIEL' in the environment: "
+            "did you mean 'APP_LISTEN_PORT_FILE'?"
+        ]
+
+    def test_no_prefix_checks_no_variables(self) -> None:
+        settings = Settings("", (PORT,), default_path=DEFAULT)
+        assert settings.resolve(environ={"PATH": "/bin", "HOME": "/"}, layers=[]).warnings == ()
+
+    def test_defaults_to_os_environ(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("APP_STRAY_FROM_OS", "1")
+        names = [w.name for w in make(PORT).resolve(layers=[]).warnings]
+        assert "APP_STRAY_FROM_OS" in names
+
+
+class TestExtraEnv:
+    def test_extra_env_suppresses_the_warning(self) -> None:
+        environ = {"APP_X": "1", "APP_Y": "1"}
+        plain = make(PORT)
+        assert [w.name for w in plain.resolve(environ=environ, layers=[]).warnings] == [
+            "APP_X",
+            "APP_Y",
+        ]
+        settings = Settings("APP_", (PORT,), default_path=DEFAULT, extra_env=("APP_X",))
+        assert settings.extra_env == ("APP_X",)
+        assert [w.name for w in settings.resolve(environ=environ, layers=[]).warnings] == ["APP_Y"]
+        assert make(PORT).extra_env == ()
+
+    @pytest.mark.parametrize(
+        ("extra", "message"),
+        [
+            (("OTHER_X",), "extra_env 'OTHER_X': doesn't start with the prefix 'APP_'"),
+            (("APP_X", "APP_X"), "extra_env 'APP_X': named twice"),
+            (("APP_LISTEN_PORT",), "extra_env 'APP_LISTEN_PORT': already read by 'listen.port'"),
+            (("APP_LISTEN_PORT_FILE",), "already read by 'listen.port'"),
+            (("APP_CONFIG",), "extra_env 'APP_CONFIG': already the config file variable"),
+            ("APP_X", "extra_env: a tuple of variable names, not one str"),
+        ],
+    )
+    def test_extra_env_is_validated(self, extra: Any, message: str) -> None:
+        with pytest.raises(ValueError, match=re.escape(message)):
+            Settings("APP_", (PORT,), default_path=DEFAULT, extra_env=extra)
 
 
 # --- _FILE ---------------------------------------------------------------------------------------

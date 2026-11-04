@@ -84,10 +84,11 @@ async def handle(ctx):
 - `check`: a callable that gets the coerced value and raises `ValueError(reason)` if it's invalid. It may return a replacement of the setting's kind (a `str`, an `int` that isn't a `bool`, a `bool`, a `tuple` of `str`); `None` keeps the value. Returning the value unchanged keeps it. A replacement of another kind is a `ConfigError` naming the key and the type, never the value. A check on a secret setting must return `None` (or the value unchanged).
 - `env` (property): the environment variable, the prefix plus the upper-cased key with dots as underscores (`MYAPP_LISTEN_PORT`). `prefix` is set by `Settings`, never by hand.
 
-**`Settings(prefix, settings, *, default_path)`**: a `Sequence[Setting]`, each one bound to `prefix`.
+**`Settings(prefix, settings, *, default_path, extra_env=())`**: a `Sequence[Setting]`, each one bound to `prefix`.
 
-- `config_env`: `prefix + "CONFIG"`, the variable that names the YAML file. Also `prefix` and `default_path`.
-- Raises `ValueError` for a bad or duplicate key, a key part YAML doesn't read as a string (`on`, `no`, `null`, `1`), two settings that would read the same variable (`a.b` and `a_b`; `x_file` and `x`'s `_FILE`; a key `config`), a list setting whose default isn't `""`, or a secret setting that isn't a str setting.
+- `config_env`: `prefix + "CONFIG"`, the variable that names the YAML file. Also `prefix`, `default_path` and `extra_env`.
+- `extra_env`: names of prefixed variables the project reads itself (`("MYAPP_DEBUG_DUMP",)`), so they give no unknown-variable warning. Each must start with the prefix, appear once, and not be a variable a setting already reads (or `<PREFIX>CONFIG`).
+- Raises `ValueError` for a bad or duplicate key, a key part YAML doesn't read as a string (`on`, `no`, `null`, `1`), two settings that would read the same variable (`a.b` and `a_b`; `x_file` and `x`'s `_FILE`; a key `config`), a list setting whose default isn't `""`, a secret setting that isn't a str setting, or an `extra_env` name that breaks its rules.
 - **`resolve(path=None, environ=None, *, layers=None) -> Resolved`**: reads `path` (else `$<PREFIX>CONFIG`, else `default_path`; missing means defaults) and `environ` (else `os.environ`), and resolves every setting. Raises `ConfigError`.
   - **`layers`**, a sequence of `Layer`, replaces the file: no file is read, and each setting takes the first of its `_FILE` variable, its variable, `layers[0]`, `layers[1]`, ..., its default. `layers=[]` means the environment and defaults only. Passing `path` with `layers` is a `ValueError`. Without `layers`, `resolve(path, environ)` is `resolve(environ=environ, layers=[read_file(path, environ)])` ([0009](https://github.com/metalayerlab/interpose/blob/main/docs/design/0009-settings-extensions.md)).
 - **`read_file(path=None, environ=None) -> Layer`**: the config file as a `Layer` with source `"file"` and `where` its path, found as `resolve()` finds it. A missing file is an empty layer; an unreadable or invalid one is the same `ConfigError` `resolve()` gives.
@@ -111,10 +112,11 @@ r.sources["listen.port"]  # "control plane"
 - `where`: what an error names for a value from this layer (`"/etc/myapp/config.yaml"`, `"control plane (config v12)"`).
 - `origins`: dotted key to a finer `where` for that key's value (`{"listen.port": "payload.listen.port"}`); an error uses it before `where`.
 
-**`Resolved(values, sources)`**: frozen, read-only mappings keyed by setting key, in declaration order.
+**`Resolved(values, sources, warnings=())`**: frozen, read-only mappings keyed by setting key, in declaration order, and the warnings.
 
 - `values[key]`: the typed value, a `Value` (`str | int | bool | tuple[str, ...] | Secret`).
 - `sources[key]`: `"<PREFIX><KEY>_FILE"`, `"<PREFIX><KEY>"`, `"file"` (or, with `layers`, the layer's `source`) or `"default"`.
+- `warnings`: a tuple of `ConfigWarning`, in the order found: each layer's unknown keys in document order, then unknown prefixed variables by name. Empty for a clean configuration. interpose never logs, prints or raises them: log each at WARNING on startup and on every reload, or raise if you want strictness ([0009](https://github.com/metalayerlab/interpose/blob/main/docs/design/0009-settings-extensions.md)).
 - **Typed accessors** `str(key)`, `int(key)` (never a `bool`), `bool(key)`, `list(key)` (a `tuple[str, ...]`) and `secret(key)` (a `Secret`) give a value with its type instead of a `cast()`. Each raises `TypeError` naming the key when the setting is another kind; on a secret setting, every one but `secret()` does, so a masked `"********"` can't reach a credential. A key that isn't declared is a `KeyError`.
 
 ```python
@@ -124,6 +126,12 @@ r.secret("upstream.token").reveal()
 # TypeError: 'upstream.token' is a secret setting, not str: use secret() and reveal()
 r.str("upstream.token")
 ```
+
+**`ConfigWarning(kind, name, message)`**: something resolution ignored, a frozen dataclass; `str()` gives `message`.
+
+- `kind`: `"unknown"` for a key in a layer that is neither a setting's key nor a parent of one, or a variable that starts with the prefix but that no setting reads (its variable, its `_FILE`, `<PREFIX>CONFIG`, `extra_env`). `"alias"` and `"ignored"` are reserved for later releases.
+- `name`: the key (dotted, at its first unknown level: `listne`, not each key below it; a non-string YAML key by its YAML text, `true` for `on:`) or the variable.
+- `message`: one line naming the key or variable and where, with the closest current name when one is close enough (`difflib`, cutoff 0.75), never a value: `unknown key 'listen.prot' in /etc/myapp/config.yaml: did you mean 'listen.port'?`, `unknown variable 'MYAPP_LISTEN_PROT' in the environment: did you mean 'MYAPP_LISTEN_PORT'?`. For a layer, where is `origins[key]` when present, else its `where`.
 
 **`ConfigError`**: the configuration can't be read, or a value in it is invalid. The message names the key, the expected type and where the value came from (the variable, `default`, or for a value from the file or a layer its path or `where`: `listen.port: expected int, got 'x' (from /etc/myapp/config.yaml)`), and never holds a secret setting's value.
 

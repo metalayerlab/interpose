@@ -14,19 +14,24 @@ The first place that has a value wins:
 The type comes from the default, and coercion is strict: a value that isn't the declared type is a
 `ConfigError`, never a silent conversion. Values are never logged, and an error never contains a
 secret setting's value. Nothing here does I/O until `Settings.resolve()` is called.
+
+An unknown key in a layer, or a prefixed variable no setting reads, is still ignored, and gives a
+`ConfigWarning` on `Resolved.warnings` for the project to log (design 0009). interpose itself never
+logs, prints or raises one.
 """
 
 from __future__ import annotations
 
 import builtins
 import datetime
+import difflib
 import os
 import re
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, cast, overload
+from typing import Any, Literal, cast, overload
 
 import yaml
 
@@ -34,6 +39,7 @@ from interpose.secret import MASK, Secret
 
 __all__ = [
     "ConfigError",
+    "ConfigWarning",
     "Layer",
     "Resolved",
     "Setting",
@@ -59,6 +65,23 @@ _SCALAR = (str, int, float, datetime.date)
 
 class ConfigError(Exception):
     """The configuration can't be read, or a value in it is invalid."""
+
+
+@dataclass(frozen=True)
+class ConfigWarning:
+    """Something in the configuration that resolution ignored, for the project to log (design 0009).
+
+    `kind` is `"unknown"` for a key or prefixed variable no setting reads (`"alias"` and `"ignored"`
+    are reserved for later steps). `name` is the key or variable it is about (`"listen.prot"`,
+    `"SLUICE_LISTEN_PROT"`); `message` is one line naming keys, variables and where, never a value.
+    """
+
+    kind: Literal["unknown", "alias", "ignored"]
+    name: str
+    message: str
+
+    def __str__(self) -> str:
+        return self.message
 
 
 @dataclass(frozen=True)
@@ -107,7 +130,8 @@ class Resolved:
 
     `values` holds `Secret` for secret settings and a tuple for list settings. `sources` holds the
     `_FILE` variable's name, the environment variable's name, `"file"` (or the `source` of the
-    `Layer` the value came from) or `"default"`.
+    `Layer` the value came from) or `"default"`. `warnings` holds a `ConfigWarning` for each unknown
+    key and prefixed variable, in the order found: layers first, in order, then variables by name.
 
     The typed accessors (`str`, `int`, `bool`, `list`, `secret`) give a value with its type, and
     raise `TypeError` naming the key when the setting is another kind (`str()` on a secret
@@ -116,6 +140,7 @@ class Resolved:
 
     values: Mapping[builtins.str, Value]
     sources: Mapping[builtins.str, builtins.str]
+    warnings: tuple[ConfigWarning, ...] = ()
 
     def _kind(self, key: builtins.str, kind: builtins.str) -> Value:
         value = self.values[key]
@@ -166,9 +191,17 @@ class Settings(Sequence[Setting]):
     """A project's settings, bound to its environment-variable prefix and default config path.
 
     Iterating gives each `Setting` with `prefix` set, so `setting.env` is the full variable name.
+    `extra_env` names prefixed variables the project reads itself, so they give no warning.
     """
 
-    def __init__(self, prefix: str, settings: Iterable[Setting], *, default_path: Path) -> None:
+    def __init__(
+        self,
+        prefix: str,
+        settings: Iterable[Setting],
+        *,
+        default_path: Path,
+        extra_env: Iterable[str] = (),
+    ) -> None:
         bound: list[Setting] = []
         seen: set[str] = set()
         # Every variable name a setting reads, so no one variable feeds two settings
@@ -198,10 +231,34 @@ class Settings(Sequence[Setting]):
                 raise ValueError(f"{setting.key!r}: a secret setting must be a str setting")
             seen.add(setting.key)
             bound.append(replace(setting, prefix=prefix))
+        if isinstance(extra_env, str):
+            raise ValueError("extra_env: a tuple of variable names, not one str")
+        extra: list[str] = []
+        for name in extra_env:
+            if not name.startswith(prefix):
+                raise ValueError(f"extra_env {name!r}: doesn't start with the prefix {prefix!r}")
+            if name in extra:
+                raise ValueError(f"extra_env {name!r}: named twice")
+            if name in names:
+                raise ValueError(f"extra_env {name!r}: already {names[name]}")
+            extra.append(name)
         self.prefix = prefix
         self.default_path = default_path
         self.config_env = prefix + "CONFIG"
+        self.extra_env = tuple(extra)
         self._settings = tuple(bound)
+        # The names the unknown-key and unknown-variable checks accept (design 0009, section 2).
+        # Later steps add to these sets: aliases (step 3) add their keys, parents and variables;
+        # sections (step 5) add their keys to `_leaf_keys`, so nothing below one is checked; list
+        # sections with fields (step 6) add their indexed variables and check items' fields.
+        # Suggestions come from current names only, never aliases.
+        self._leaf_keys = frozenset(seen)
+        self._known_keys = frozenset(
+            ".".join(parts[:end])
+            for parts in (key.split(".") for key in seen)
+            for end in range(1, len(parts) + 1)
+        )
+        self._known_env = frozenset(names) | frozenset(extra)
 
     @overload
     def __getitem__(self, index: int) -> Setting: ...
@@ -259,7 +316,46 @@ class Settings(Sequence[Setting]):
         sources: dict[str, str] = {}
         for setting in self._settings:
             values[setting.key], sources[setting.key] = _resolve_one(setting, layers, env)
-        return Resolved(values=MappingProxyType(values), sources=MappingProxyType(sources))
+        warnings = [w for layer in layers for w in self._unknown_keys(layer)]
+        warnings += self._unknown_env(env)
+        return Resolved(
+            values=MappingProxyType(values),
+            sources=MappingProxyType(sources),
+            warnings=tuple(warnings),
+        )
+
+    def _unknown_keys(
+        self, layer: Layer, node: Mapping[Any, Any] | None = None, parent: str = ""
+    ) -> Iterator[ConfigWarning]:
+        """An `unknown` warning for each path in the layer that is neither a key nor a parent of
+        one, at its first unknown level, in document order. Never a value."""
+        for part, child in (layer.data if node is None else node).items():
+            # A non-string key (`on:` loads as True) is named by its YAML text.
+            text = part if isinstance(part, str) else _yaml_text(part)
+            path = f"{parent}.{text}" if parent else text
+            # A key with a dot in it (`listen.port:` at the top) is never a part of a declared
+            # key, and resolution never reads it, though its dotted path would look known.
+            if not isinstance(part, str) or "." in part or path not in self._known_keys:
+                where = layer.origins.get(path, layer.where)
+                message = f"unknown key {path!r} in {where}"
+                # Suggest a key or parent at the same depth: `listne` gets `listen`, and
+                # `listen.1` never gets its own parent `listen`.
+                depth = path.count(".")
+                peers = (k for k in self._known_keys if k.count(".") == depth)
+                yield ConfigWarning("unknown", path, message + _did_you_mean(path, peers))
+            elif path not in self._leaf_keys and isinstance(child, Mapping):
+                yield from self._unknown_keys(layer, child, path)
+
+    def _unknown_env(self, environ: Mapping[str, str]) -> Iterator[ConfigWarning]:
+        """An `unknown` warning for each prefixed variable no setting reads, by name. Only names
+        are read, never values. With no prefix, every variable would be "prefixed": none is
+        checked."""
+        if not self.prefix:
+            return
+        for name in sorted(n for n in environ if n.startswith(self.prefix)):
+            if name not in self._known_env:
+                message = f"unknown variable {name!r} in the environment"
+                yield ConfigWarning("unknown", name, message + _did_you_mean(name, self._known_env))
 
 
 def _read_yaml(path: Path) -> Mapping[str, Any]:
@@ -284,6 +380,21 @@ def _read_yaml(path: Path) -> Mapping[str, Any]:
     if not isinstance(loaded, dict):
         raise ConfigError(f"{path}: the top level must be a mapping")
     return loaded
+
+
+def _yaml_text(key: object) -> str:
+    """A non-string YAML key as YAML writes it: `true` for True, `null` for None, `1` for 1."""
+    try:
+        return yaml.safe_dump(key, default_flow_style=True).removesuffix("\n...\n").strip()
+    except yaml.YAMLError:
+        # Only a project-built `Layer` can hold a key YAML can't write (a tuple, say).
+        return repr(key)
+
+
+def _did_you_mean(name: str, known: Iterable[str]) -> str:
+    """`: did you mean '<closest>'?` for the closest known name, or nothing (design 0009)."""
+    close = difflib.get_close_matches(name, sorted(known), n=1, cutoff=0.75)
+    return f": did you mean {close[0]!r}?" if close else ""
 
 
 def _is_yaml_str(part: str) -> bool:

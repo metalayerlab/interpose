@@ -2,7 +2,7 @@
 
 <!-- Add a line for this record to the index in docs/design/README.md (CI checks). -->
 
-Status: Implemented (v0.1.0); unknown-key handling amended by [0009](0009-settings-extensions.md) (Approved)
+Status: Implemented (v0.1.0); unknown-key handling amended by [0009](0009-settings-extensions.md) (Implemented)
 Date: 2026-11-01
 Authors: andronics; drafted by Claude
 
@@ -248,7 +248,7 @@ Where the text above left a choice, v0.1.0 made these:
 - **str** takes a YAML scalar: a string, int, float, bool or date (`true` gives `"True"`). Collections,
   binary and sets are errors.
 - **A YAML `null` means unset**, and so does a scalar where a mapping is expected, as in the three copies.
-  Unknown YAML keys are ignored. (Amended by [0009](0009-settings-extensions.md), Approved: an unknown
+  Unknown YAML keys are ignored. (Amended by [0009](0009-settings-extensions.md), Implemented: an unknown
   key or prefixed variable gives a warning with a did-you-mean suggestion, and is still ignored.)
 - **`check` runs on every value, the default included**, and a secret setting's value is replaced with
   `MASK` in the check's reason, as written and as `repr()`/`ascii()` escape it. A coercion error for a secret setting names the key and type only.
