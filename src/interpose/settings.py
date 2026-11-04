@@ -41,6 +41,7 @@ from __future__ import annotations
 import builtins
 import datetime
 import difflib
+import math
 import os
 import re
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence, Set
@@ -118,7 +119,8 @@ class Section(Mapping[str, Node]):
     float, bool, date, datetime, `None`), and a secret leaf is a `Secret`. Nothing in it can be
     changed, at any depth. A `Section` is hashable, and equal only to another `Section` with the
     same keys and values of the same types (`1` is not `True`, and `1` is not `1.0`), so a reload
-    can compare old and new. `repr()` masks every `Secret`.
+    can compare old and new. A float NaN equals any other NaN in it (issue #49). `repr()` masks
+    every `Secret`.
 
     `Section(mapping)` freezes a mapping of the same shape (a check builds its replacement this
     way): a non-str key, or a value of any other type, is a `TypeError`, and a mapping or list
@@ -214,9 +216,16 @@ def _freeze(node: object, active: set[int]) -> Node:
     raise TypeError(f"a Section holds mappings, lists and scalars, not {type(node).__name__}")
 
 
+_NAN = (float, "nan")  # what `_strict` gives every float NaN: a fixed, hashable value
+
+
 def _strict(node: Node) -> object:
     """What `Section` equality and hashing compare for a value: its type with it, so `1`, `True`
-    and `1.0` differ, as do a date and a datetime (a Section or Secret compares itself)."""
+    and `1.0` differ, as do a date and a datetime (a Section or Secret compares itself). Every
+    float NaN, of any sign or payload, is one value (issue #49): `nan != nan`, and since Python
+    3.10 two NaN objects hash apart, so a NaN read twice would never equal itself."""
+    if isinstance(node, float) and math.isnan(node):
+        return _NAN
     if isinstance(node, tuple):
         return (tuple, tuple(_strict(item) for item in node))
     if isinstance(node, Section | Secret):

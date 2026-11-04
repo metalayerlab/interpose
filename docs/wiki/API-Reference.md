@@ -138,7 +138,7 @@ r.str("upstream.token")
 
 **`Section(mapping=None)`**: a section setting's value, a read-only `Mapping[str, ...]`, deep-frozen: nested mappings are `Section`s, lists are tuples, scalars are as YAML loaded them (str, int, float, bool, date, datetime, `None`), and secret leaves are `Secret`s. Nothing in it can be changed at any depth.
 
-- Hashable, and equal only to another `Section` with the same keys and values of the same types: `1`, `True` and `1.0` differ, and a `Section` is never equal to a `dict` (compare `dict(section)` for that). Key order doesn't matter. A reload compares old and new by equality.
+- Hashable, and equal only to another `Section` with the same keys and values of the same types: `1`, `True` and `1.0` differ, and a `Section` is never equal to a `dict` (compare `dict(section)` for that). Key order doesn't matter. A float NaN (`.nan`) equals any other NaN in a `Section`, of any sign or payload, though Python's `nan != nan`, so a section holding one equals itself on reload. A reload compares old and new by equality.
 - `repr()` masks every `Secret` in it.
 - `Section(mapping)` freezes a mapping of that shape, for a check's replacement; a non-str key, or a value of another type, is a `TypeError`, and a mapping or list that holds itself is a `ValueError`. It reads no files: `{secret_file: ...}` means a secret leaf only in configuration.
 

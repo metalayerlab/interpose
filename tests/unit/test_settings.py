@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import copy
 import datetime
+import json
 import logging
+import math
 import os
 import pickle
 import re
+import struct
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
+import yaml
 
 from interpose.secret import MASK, Secret
 from interpose.settings import (
@@ -2143,6 +2147,38 @@ class TestSectionValue:
         # Python says 1 == True == 1.0; a config that changes `1` to `true` has changed.
         assert Section({"v": left}) != Section({"v": right})
 
+    def test_nan_equals_nan_and_hashes_the_same(self) -> None:
+        # Issue #49: nan != nan, and two NaN objects hash apart, so equality maps every NaN to one.
+        # PyYAML gives one shared object for every `.nan`, so these are built apart.
+        yaml_nan = Section(yaml.safe_load("x: .nan"))
+        for other in (float("nan"), math.nan, json.loads("NaN"), -float("nan")):
+            assert other is not yaml_nan["x"]
+            assert Section({"x": other}) == yaml_nan
+            assert hash(Section({"x": other})) == hash(yaml_nan)
+        assert len({Section({"x": float("nan")}), Section({"x": float("nan")})}) == 1
+
+    def test_a_nan_with_another_payload_or_sign_is_still_nan(self) -> None:
+        payload = struct.unpack("<d", struct.pack("<Q", 0x7FF8000000000001))[0]
+        negative = struct.unpack("<d", struct.pack("<Q", 0xFFF8000000000000))[0]
+        assert math.isnan(payload) and math.isnan(negative) and math.copysign(1, negative) < 0
+        nan = Section(yaml.safe_load("x: .nan"))
+        assert Section({"x": payload}) == nan and hash(Section({"x": payload})) == hash(nan)
+        assert Section({"x": negative}) == nan and hash(Section({"x": negative})) == hash(nan)
+
+    def test_a_nan_nested_in_a_list_or_a_mapping_equals_nan(self) -> None:
+        a = Section({"l": [1, float("nan")], "m": {"n": float("nan"), "l": [{"x": float("nan")}]}})
+        b = Section({"l": [1, float("nan")], "m": {"n": float("nan"), "l": [{"x": float("nan")}]}})
+        assert a == b and hash(a) == hash(b)
+
+    @pytest.mark.parametrize("other", [math.inf, -math.inf, 0.0, "nan", ".nan", "-.nan", None])
+    def test_nan_still_differs_from_other_values(self, other: object) -> None:
+        # Only a float NaN is NaN: inf, a string spelling it (YAML reads `-.nan` as a str) differ.
+        assert Section({"x": float("nan")}) != Section({"x": other})
+
+    def test_inf_still_equals_itself(self) -> None:
+        assert Section({"x": float("inf")}) == Section({"x": math.inf})
+        assert Section({"x": -math.inf}) != Section({"x": math.inf})
+
     def test_equal_only_to_a_section(self) -> None:
         assert Section({"a": 1}) != {"a": 1}
         assert dict(Section({"a": 1})) == {"a": 1}
@@ -2676,6 +2712,17 @@ class TestSectionAliases:
         r = make(self.MOVED).resolve(environ={}, layers=[layer(data, secret_files=True)])
         assert r.section("mw") == Section({"a": [1, {"t": Secret(VALUE)}]})
 
+    def test_nan_as_both_the_key_and_an_old_name_is_no_conflict(self) -> None:
+        # Issue #49: the key and an old name both NaN, each its own object, aren't a conflict.
+        data = {
+            "mw": {"a": float("nan"), "l": [float("nan")]},
+            "middleware": {"a": float("nan"), "l": [float("nan")]},
+        }
+        assert data["mw"]["a"] is not data["middleware"]["a"]
+        r = make(self.MOVED).resolve(environ={}, layers=[control(data)])
+        value: Any = r.section("mw")
+        assert math.isnan(value["a"]) and math.isnan(value["l"][0])
+
     @pytest.mark.parametrize("old", [{"a": 2}, {"a": True}, {"a": 1, "b": 1}, {"a": 1.0}])
     def test_different_sections_at_one_level_are_an_error(self, old: dict[str, Any]) -> None:
         data = {"mw": {"a": 1}, "middleware": old}
@@ -2928,6 +2975,26 @@ class TestSectionReload:
         rotated = settings.resolve(config, {}).section("middleware.config")
         assert rotated["t"] == Secret("rotated")
         assert rotated != first
+
+    def test_an_unchanged_nan_is_no_change(self, tmp_path: Path) -> None:
+        # Issue #49: a reload of the same payload (each NaN its own object, as a project's
+        # parser may build them) or of the same file sees no change.
+        def payload() -> dict[str, Any]:
+            nan = float("nan")
+            return {"middleware": {"config": {"r": nan, "l": [-nan, {"x": float("nan")}]}}}
+
+        settings = make(MW)
+        first = settings.resolve(environ={}, layers=[control(payload())])
+        again = settings.resolve(environ={}, layers=[control(payload())])
+        old, new = first.section("middleware.config"), again.section("middleware.config")
+        assert old["r"] is not new["r"]
+        assert old == new and hash(old) == hash(new)
+        config = tmp_path / "config.yaml"
+        text = "middleware: {config: {r: .nan, l: [.nan, {x: .nan}]}}\n"
+        config.write_text(text, encoding="utf-8")
+        from_file = settings.resolve(config, {}).section("middleware.config")
+        assert from_file == settings.resolve(config, {}).section("middleware.config")
+        assert from_file == new and hash(from_file) == hash(new)
 
 
 # --- typed list items and indexed variables (design 0009 step 6) ----------------------------------
