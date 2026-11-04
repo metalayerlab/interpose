@@ -92,6 +92,17 @@ Config(log_level='INFO', port=9090, token=Secret('********'), hosts=('example.or
 
 A project that passes `Settings(..., expand=True)` lets its config file use the environment: `port: "${PORT:-9090}"` takes `$PORT`, else 9090, and an unset `${HOST}` with no default is an error. It is off by default.
 
+Options that don't fit a fixed setting, such as each middleware's own, go in a section: `Setting("middleware.config", "", "Per-middleware options.", is_section=True)` takes the whole subtree under `middleware: config:` as a read-only `Section`, which the project validates in `load_config`. A secret inside it is written as a file, never inline:
+
+```yaml
+middleware:
+  config:
+    ratelimit: {per_minute: 60}
+    auth: {token: {secret_file: /run/secrets/auth-token}}
+```
+
+`r.section("middleware.config")["auth"]["token"]` is then a `Secret`. In Kubernetes, mount the section as a file and point `MYAPP_MIDDLEWARE_CONFIG_FILE` at it.
+
 For secrets that aren't settings (a middleware's API keys, say), `read_secret_dir(Path("/run/secrets"))` reads each file in a directory as a `Secret`.
 
 ## Next steps

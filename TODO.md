@@ -26,3 +26,4 @@ the team (and its AI assistants) should know at a glance.
 - Built-in middleware (a `Snapshot`/TTL cache, ...) or preset policies: mechanism only, as sluice's 0002 rules (design 0003).
 - Unknown keys as errors (or a strict switch in interpose): breaks rollbacks and shared config files; they warn on `Resolved.warnings`, and a project that wants errors raises on them (design 0009).
 - Unset `${VAR}` expanding to empty by default (qbt-rules' behaviour): a typo in a variable name would configure an empty value silently; it is an error by default, and `expand_unset="empty"` opts in (design 0009).
+- Typed sections everywhere, no free-form: qbt-rules validates its items itself, and `middleware.config` is per middleware by nature, so a schema in interpose would duplicate each one; a section is free-form, and only a list section may declare item fields (design 0009).

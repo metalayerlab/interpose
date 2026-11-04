@@ -21,10 +21,10 @@ A project declares its settings once, as `Setting(key, default, help, ...)` entr
 3. the YAML file (`<PREFIX>CONFIG`, else the default path)
 4. the declared default
 
-The default's type is the setting's type, and coercion is strict: a YAML `0.5` for an int setting is an error, not `0`. The result, `Resolved`, holds the typed values and where each came from. A `secret=True` setting comes back as a `Secret`, which prints as `********` until `reveal()` is called. The same declarations generate each project's wiki settings table. The rules are on [Architecture Internals](Architecture-Internals).
+The default's type is the setting's type, and coercion is strict: a YAML `0.5` for an int setting is an error, not `0`. A section setting (`is_section=True`) takes a whole YAML subtree instead, such as per-middleware options, frozen as a read-only `Section` for the project to validate. The result, `Resolved`, holds the typed values and where each came from. A `secret=True` setting comes back as a `Secret`, which prints as `********` until `reveal()` is called. The same declarations generate each project's wiki settings table. The rules are on [Architecture Internals](Architecture-Internals).
 
 ## When not to use it
 
 - **Outside metalayerlab's own projects.** It isn't on PyPI, and its API is shaped by its consumers' needs. For general use, pydantic-settings or dynaconf do more.
-- **Float, nested-object or per-request settings.** Values are str, int, bool or a list of strings, read once at startup.
+- **Float or per-request settings.** Values are str, int, bool, a list of strings or a section, read once at startup. A section is free-form: interpose checks only that it is a mapping with string keys, and the project validates what is in it.
 - **Rules between settings** (two settings set together or not at all). Write those in the project's `load_config`, after `resolve()`.
