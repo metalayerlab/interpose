@@ -31,6 +31,11 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/interpose"]
 
+[tool.hatch.build.targets.sdist]
+# The meta module (brain record 0019) is the network-tools centre's tool, not the library:
+# it ships in neither the wheel (above) nor the sdist, and nor do its tests, which need it.
+exclude = ["/meta", "/tests/unit/test_meta_network_tools.py", "/tests/unit/meta_fixtures"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py313"
@@ -44,10 +49,14 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "S", "T20"]
 "scripts/*" = ["T20", "S603", "S607"]
 # benchmarks print their results.
 "benchmarks/*" = ["T20"]
+# The meta module is a CLI: it prints, and runs gh and git, by design.
+"meta/*" = ["T20", "S603", "S607"]
 
 [tool.mypy]
 strict = true
-files = ["src/interpose", "tests", "scripts", "benchmarks"]
+files = ["src/interpose", "tests", "scripts", "benchmarks", "meta"]
+# meta/ is not a package: its module is imported by name, by the executable and the tests.
+mypy_path = "meta"
 
 [tool.pytest.ini_options]
 addopts = "-q --strict-markers --strict-config --cov --cov-report=term-missing:skip-covered"
