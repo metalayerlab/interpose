@@ -88,17 +88,33 @@ async def handle(ctx):
 
 - `config_env`: `prefix + "CONFIG"`, the variable that names the YAML file. Also `prefix` and `default_path`.
 - Raises `ValueError` for a bad or duplicate key, a key part YAML doesn't read as a string (`on`, `no`, `null`, `1`), two settings that would read the same variable (`a.b` and `a_b`; `x_file` and `x`'s `_FILE`; a key `config`), a list setting whose default isn't `""`, or a secret setting that isn't a str setting.
-- **`resolve(path=None, environ=None) -> Resolved`**: reads `path` (else `$<PREFIX>CONFIG`, else `default_path`; missing means defaults) and `environ` (else `os.environ`), and resolves every setting. Raises `ConfigError`.
+- **`resolve(path=None, environ=None, *, layers=None) -> Resolved`**: reads `path` (else `$<PREFIX>CONFIG`, else `default_path`; missing means defaults) and `environ` (else `os.environ`), and resolves every setting. Raises `ConfigError`.
+  - **`layers`**, a sequence of `Layer`, replaces the file: no file is read, and each setting takes the first of its `_FILE` variable, its variable, `layers[0]`, `layers[1]`, ..., its default. `layers=[]` means the environment and defaults only. Passing `path` with `layers` is a `ValueError`. Without `layers`, `resolve(path, environ)` is `resolve(environ=environ, layers=[read_file(path, environ)])` ([0009](https://github.com/metalayerlab/interpose/blob/main/docs/design/0009-settings-extensions.md)).
+- **`read_file(path=None, environ=None) -> Layer`**: the config file as a `Layer` with source `"file"` and `where` its path, found as `resolve()` finds it. A missing file is an empty layer; an unreadable or invalid one is the same `ConfigError` `resolve()` gives.
 
 ```python
 r = SETTINGS.resolve(Path("config.yaml"), {"MYAPP_LISTEN_PORT": "9090"})
 r.values["listen.port"], r.sources["listen.port"]  # (9090, "MYAPP_LISTEN_PORT")
+
+# Managed values first, then the local file (layers replace the file, so it's passed too).
+payload = Layer(
+    {"listen": {"port": 9443}}, source="control plane", where="control plane (config v12)"
+)
+r = SETTINGS.resolve(layers=[payload, SETTINGS.read_file()])
+r.sources["listen.port"]  # "control plane"
 ```
+
+**`Layer(data, source, where, origins={})`**: values from one place, a frozen dataclass.
+
+- `data`: a YAML-shaped tree, what `yaml.safe_load` gives for a config file. `resolve()` reads it, and never changes or keeps it.
+- `source`: what `Resolved.sources` says for a value from this layer (`"file"`, `"control plane"`).
+- `where`: what an error names for a value from this layer (`"/etc/myapp/config.yaml"`, `"control plane (config v12)"`).
+- `origins`: dotted key to a finer `where` for that key's value (`{"listen.port": "payload.listen.port"}`); an error uses it before `where`.
 
 **`Resolved(values, sources)`**: frozen, read-only mappings keyed by setting key, in declaration order.
 
 - `values[key]`: the typed value, a `Value` (`str | int | bool | tuple[str, ...] | Secret`).
-- `sources[key]`: `"<PREFIX><KEY>_FILE"`, `"<PREFIX><KEY>"`, `"file"` or `"default"`.
+- `sources[key]`: `"<PREFIX><KEY>_FILE"`, `"<PREFIX><KEY>"`, `"file"` (or, with `layers`, the layer's `source`) or `"default"`.
 - **Typed accessors** `str(key)`, `int(key)` (never a `bool`), `bool(key)`, `list(key)` (a `tuple[str, ...]`) and `secret(key)` (a `Secret`) give a value with its type instead of a `cast()`. Each raises `TypeError` naming the key when the setting is another kind; on a secret setting, every one but `secret()` does, so a masked `"********"` can't reach a credential. A key that isn't declared is a `KeyError`.
 
 ```python
@@ -109,9 +125,9 @@ r.secret("upstream.token").reveal()
 r.str("upstream.token")
 ```
 
-**`ConfigError`**: the configuration can't be read, or a value in it is invalid. The message names the key, the expected type and the source, and never holds a secret setting's value.
+**`ConfigError`**: the configuration can't be read, or a value in it is invalid. The message names the key, the expected type and where the value came from (the variable, `default`, or for a value from the file or a layer its path or `where`: `listen.port: expected int, got 'x' (from /etc/myapp/config.yaml)`), and never holds a secret setting's value.
 
-**Checks**, for `check=`. Each raises `ValueError`, which `resolve()` turns into `ConfigError("<key>: <reason>")`; `one_of` also replaces the value:
+**Checks**, for `check=`. Each raises `ValueError`, which `resolve()` turns into `ConfigError("<key>: <reason>")`, followed by `(from <where>)`, after a space, when the value came from the file or a layer; `one_of` also replaces the value:
 
 | Check | Passes |
 |---|---|

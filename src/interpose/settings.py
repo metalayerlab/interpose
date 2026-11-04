@@ -4,7 +4,8 @@ The first place that has a value wins:
 
 1. ``<PREFIX><KEY>_FILE``: a file that holds the value (Docker and Kubernetes secrets)
 2. ``<PREFIX><KEY>``: an environment variable
-3. the YAML config file (``<PREFIX>CONFIG``, else the project's default path)
+3. the YAML config file (``<PREFIX>CONFIG``, else the project's default path), or in its place
+   the `Layer`s a project passes to `Settings.resolve(layers=...)`, first one first
 4. the declared default
 
 ``<KEY>`` is the dotted key in upper case, with the dots as underscores: with the prefix
@@ -22,7 +23,7 @@ import datetime
 import os
 import re
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, cast, overload
@@ -33,6 +34,7 @@ from interpose.secret import MASK, Secret
 
 __all__ = [
     "ConfigError",
+    "Layer",
     "Resolved",
     "Setting",
     "Settings",
@@ -83,11 +85,29 @@ class Setting:
 
 
 @dataclass(frozen=True)
+class Layer:
+    """A YAML-shaped tree of values from one place, with where it came from (design 0009).
+
+    `data` is what `yaml.safe_load` gives for a config file: nested mappings keyed by the parts of
+    a dotted key. `source` is what `Resolved.sources` says for a value from here (`"file"`,
+    `"control plane"`); `where` is what an error names (a path, `"control plane (config v12)"`).
+    `origins` maps a dotted key to a finer `where` for that value. `resolve()` reads `data` and
+    never changes or keeps it.
+    """
+
+    data: Mapping[str, Any]
+    source: str
+    where: str
+    origins: Mapping[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class Resolved:
     """Typed values and where each came from, both keyed by setting key, in declaration order.
 
     `values` holds `Secret` for secret settings and a tuple for list settings. `sources` holds the
-    `_FILE` variable's name, the environment variable's name, `"file"` or `"default"`.
+    `_FILE` variable's name, the environment variable's name, `"file"` (or the `source` of the
+    `Layer` the value came from) or `"default"`.
 
     The typed accessors (`str`, `int`, `bool`, `list`, `secret`) give a value with its type, and
     raise `TypeError` naming the key when the setting is another kind (`str()` on a secret
@@ -201,22 +221,44 @@ class Settings(Sequence[Setting]):
             f"Settings({self.prefix!r}, {len(self)} settings, default_path={self.default_path!r})"
         )
 
-    def resolve(
+    def read_file(
         self, path: Path | None = None, environ: Mapping[str, str] | None = None
+    ) -> Layer:
+        """The config file as a `Layer`: source `"file"`, `where` its path.
+
+        `path` defaults to `<PREFIX>CONFIG`, else `default_path`; a missing file is an empty layer.
+        `environ` defaults to `os.environ`. Raises `ConfigError` if it can't be read or parsed.
+        """
+        env = os.environ if environ is None else environ
+        if path is None:
+            path = Path(env.get(self.config_env, str(self.default_path)))
+        return Layer(data=_read_yaml(path), source="file", where=str(path))
+
+    def resolve(
+        self,
+        path: Path | None = None,
+        environ: Mapping[str, str] | None = None,
+        *,
+        layers: Sequence[Layer] | None = None,
     ) -> Resolved:
         """Read the config file and the environment, and resolve every setting.
 
         `path` defaults to `<PREFIX>CONFIG`, else `default_path`; a missing file means defaults.
         `environ` defaults to `os.environ`. Raises `ConfigError` on the first invalid value.
+
+        `layers` replaces the file: no file is read, and each setting takes its `_FILE` variable,
+        then its variable, then the first layer that has it, then its default. Passing `path` too
+        is a `ValueError`. Without `layers`, the file is the one layer (`read_file(path, environ)`).
         """
         env = os.environ if environ is None else environ
-        if path is None:
-            path = Path(env.get(self.config_env, str(self.default_path)))
-        data = _read_yaml(path)
+        if layers is None:
+            layers = (self.read_file(path, env),)
+        elif path is not None:
+            raise ValueError("resolve(): pass path or layers, not both (layers replace the file)")
         values: dict[str, Value] = {}
         sources: dict[str, str] = {}
         for setting in self._settings:
-            values[setting.key], sources[setting.key] = _resolve_one(setting, data, env)
+            values[setting.key], sources[setting.key] = _resolve_one(setting, layers, env)
         return Resolved(values=MappingProxyType(values), sources=MappingProxyType(sources))
 
 
@@ -261,10 +303,13 @@ def _lookup(data: Mapping[str, Any], dotted: str) -> Any:
 
 
 def _resolve_one(
-    setting: Setting, data: Mapping[str, Any], environ: Mapping[str, str]
+    setting: Setting, layers: Sequence[Layer], environ: Mapping[str, str]
 ) -> tuple[Value, str]:
     file_var = f"{setting.env}_FILE"
     raw: Any
+    # For a value from a layer, where an error says it came from: the key's origin, else the
+    # layer's `where`. None for a variable or the default: a coercion error names `source`.
+    where: str | None = None
     if file_var in environ:
         path = Path(environ[file_var])
         try:
@@ -277,11 +322,14 @@ def _resolve_one(
     elif setting.env in environ:
         raw, source = environ[setting.env], setting.env
     else:
-        raw = _lookup(data, setting.key)
-        source = "file"
-        if raw is None:
-            raw, source = setting.default, "default"
-    value = _coerce(setting, raw, source)
+        raw, source = setting.default, "default"
+        for layer in layers:
+            found = _lookup(layer.data, setting.key)
+            if found is not None:
+                raw, source = found, layer.source
+                where = layer.origins.get(setting.key, layer.where)
+                break
+    value = _coerce(setting, raw, source if where is None else where)
     if setting.check is not None:
         try:
             replacement = setting.check(value)
@@ -292,7 +340,10 @@ def _resolve_one(
                 # quotes, control characters). A check shouldn't echo a secret at all.
                 for form in sorted({value, repr(value)[1:-1], ascii(value)[1:-1]}, key=len)[::-1]:
                     reason = reason.replace(form, MASK)
-            raise ConfigError(f"{setting.key}: {reason}") from None
+            # A layer's value names where it came from; a variable's or the default's, as before,
+            # names no source.
+            origin = "" if where is None else f" (from {where})"
+            raise ConfigError(f"{setting.key}: {reason}{origin}") from None
         if replacement is not None:
             value = _replace(setting, value, replacement)
     if setting.secret:
