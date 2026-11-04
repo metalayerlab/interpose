@@ -70,6 +70,26 @@ The project doesn't expand variables in its config file (`Settings(expand=...)` 
 
 The setting is a section (a YAML subtree), which can't be written in one environment variable. Put it in the config file, or in a YAML file named by `MYAPP_MIDDLEWARE_CONFIG_FILE`, and unset the plain variable: it is an error even beside the `_FILE`.
 
+### "schedule: MYAPP_SCHEDULE is set, but a list section is read from a YAML file or indexed variables: ..."
+
+The setting is a list section with declared fields. Set its items one variable per field (`MYAPP_SCHEDULE_0_CRON`, `MYAPP_SCHEDULE_0_CONTEXT`, then `_1_...`), or put the list in a YAML file named by `MYAPP_SCHEDULE_FILE`, and unset the plain variable.
+
+### "schedule[1].context: MYAPP_SCHEDULE_1_CONTEXT is not set, but MYAPP_SCHEDULE_1_CRON is"
+
+An item set by indexed variables lacks a required field. Item `N` exists as soon as any of its field variables is set, so set the missing one, or unset the item's others. A lone `_1_CONTEXT` is an error too: interpose can't tell which field marks an item.
+
+### "schedule[1].cron: a required field, not set (from /etc/myapp/config.yaml)"
+
+An item in the list (counted from 0) lacks a required field, or sets it to `null`. Add it. If the item has a key that looks like it, check the warnings for an `unknown field` with a suggestion.
+
+### "ignored variable 'MYAPP_SCHEDULE_3_CRON' in the environment: the list 'schedule' ends before it, ..."
+
+Items from indexed variables are numbered from 0 without gaps: the first number with no field variable set ends the list, and anything after it is ignored. Renumber the variables. If item 0 itself is missing, nothing is read from them and the file's list stands.
+
+### "unknown field 'schedule[1].cronn' in ...: did you mean 'schedule[1].cron'?"
+
+An item in a list with declared fields has a key that is none of them. It is ignored; a required field it was meant to be is then missing. Fix the spelling. A misspelt indexed variable gives `unknown variable 'MYAPP_SCHEDULE_0_CRONN' ...` the same way.
+
 ### "middleware.config.auth: secret files are read only from local configuration (the config file or a section's _FILE), not from control plane ..."
 
 A section from a remote layer, such as a control plane's managed configuration, holds a `{secret_file: ...}` leaf. interpose never reads a file a remote payload names. Move the secret leaf to the local config file or the section's `_FILE`, or have the control plane send something the project resolves itself.

@@ -103,6 +103,24 @@ middleware:
 
 `r.section("middleware.config")["auth"]["token"]` is then a `Secret`. In Kubernetes, mount the section as a file and point `MYAPP_MIDDLEWARE_CONFIG_FILE` at it.
 
+A list whose items have a fixed shape declares its fields, and interpose types each one:
+
+```python
+Setting(
+    "schedule",
+    "",
+    "Cron schedule.",
+    is_section=True,
+    is_list=True,
+    fields=(
+        Setting("cron", "", "A 5-field cron expression.", required=True),
+        Setting("context", "", "The context to enqueue.", required=True),
+    ),
+)
+```
+
+`r.sections("schedule")` is then a tuple of `Section`s, each holding `cron` and `context`. The list can also be set in the environment, item by item from 0: `MYAPP_SCHEDULE_0_CRON="0 * * * *"` and `MYAPP_SCHEDULE_0_CONTEXT=hourly`, then `_1_...`. Set this way, it replaces the file's list. A missing required field stops it with `schedule[1].context: MYAPP_SCHEDULE_1_CONTEXT is not set, but MYAPP_SCHEDULE_1_CRON is`.
+
 For secrets that aren't settings (a middleware's API keys, say), `read_secret_dir(Path("/run/secrets"))` reads each file in a directory as a `Secret`.
 
 ## Next steps
