@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/metalayerlab/interpose/compare/v0.5.0...v0.5.1) (2026-11-04)
+
+
+### 📚 Documentation
+
+* mark design 0010 Implemented ([#62](https://github.com/metalayerlab/interpose/issues/62)) ([62f81a9](https://github.com/metalayerlab/interpose/commit/62f81a9d58cd6c5d742c505eabd809040fa73d01))
+
 ## [0.5.0](https://github.com/metalayerlab/interpose/compare/v0.4.3...v0.5.0) (2026-11-04)
 
 
