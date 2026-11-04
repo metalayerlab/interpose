@@ -1627,3 +1627,351 @@ class TestAliasSecrets:
                 make(self.TOKEN).resolve(environ=environ, layers=layers)
             assert "proxy.auth" in str(e.value)
             assert VALUE not in str(e.value)
+
+
+# --- ${VAR} expansion (design 0009, step 4) -----------------------------------------------------
+
+URL = Setting("upstream.url", "", "Upstream.")
+HOSTS = Setting("hosts", "", "Hosts.", is_list=True)
+
+
+def expanding(*settings: Setting, **kwargs: Any) -> Settings:
+    return Settings("APP_", settings, default_path=DEFAULT, expand=True, **kwargs)
+
+
+def resolve_expanding(
+    tmp_path: Path,
+    yaml_text: str,
+    *settings: Setting,
+    environ: Mapping[str, str] | None = None,
+    **kwargs: Any,
+) -> Resolved:
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml_text, encoding="utf-8")
+    return expanding(*settings, **kwargs).resolve(path, environ or {})
+
+
+def expanded_url(environ: Mapping[str, str] | None = None) -> Value:
+    """`${HOST}` from a layer with `expand=True`: proves expansion is on where a test shows a
+    value that must not expand."""
+    data = {"upstream": {"url": "${HOST}"}}
+    r = make(URL).resolve(environ=environ or {"HOST": "h"}, layers=[layer(data, expand=True)])
+    return r.values["upstream.url"]
+
+
+class TestExpansionOptIn:
+    def test_off_by_default_a_var_stays_literal(self, tmp_path: Path) -> None:
+        r = resolve_yaml(tmp_path, "upstream: {url: '${HOST}'}\n", URL, environ={"HOST": "h"})
+        assert r.values["upstream.url"] == "${HOST}"
+        assert make(URL).expand is False and make(URL).expand_unset == "error"
+        r = resolve_expanding(tmp_path, "upstream: {url: '${HOST}'}\n", URL, environ={"HOST": "h"})
+        assert r.values["upstream.url"] == "h"
+
+    def test_read_file_sets_the_layers_expand(self, tmp_path: Path) -> None:
+        path = tmp_path / "config.yaml"
+        path.write_text("a: 1\n", encoding="utf-8")
+        assert make(URL).read_file(path, {}).expand is False
+        assert expanding(URL).read_file(path, {}).expand is True
+        assert Layer({}, source="file", where=ETC).expand is False
+
+    def test_a_layer_without_expand_doesnt_expand_even_when_the_project_does(self) -> None:
+        r = expanding(URL).resolve(
+            environ={"HOST": "h"}, layers=[layer({"upstream": {"url": "${HOST}"}})]
+        )
+        assert r.values["upstream.url"] == "${HOST}"
+        assert expanded_url() == "h"
+
+    def test_a_layer_with_expand_expands_even_when_the_project_doesnt(self) -> None:
+        data = {"upstream": {"url": "${HOST}"}}
+        r = make(URL).resolve(environ={"HOST": "h"}, layers=[layer(data, expand=True)])
+        assert (r.values["upstream.url"], r.sources["upstream.url"]) == ("h", "file")
+
+    def test_variables_never_expand(self) -> None:
+        environ = {"APP_UPSTREAM_URL": "${HOST}", "HOST": "h"}
+        r = expanding(URL).resolve(environ=environ, layers=[layer({}, expand=True)])
+        assert (r.values["upstream.url"], r.sources["upstream.url"]) == (
+            "${HOST}",
+            "APP_UPSTREAM_URL",
+        )
+        assert expanded_url() == "h"
+
+    def test_file_variable_contents_never_expand(self, tmp_path: Path) -> None:
+        (tmp_path / "url").write_text("${HOST}\n", encoding="utf-8")
+        environ = {"APP_UPSTREAM_URL_FILE": str(tmp_path / "url"), "HOST": "h"}
+        r = expanding(URL).resolve(environ=environ, layers=[layer({}, expand=True)])
+        assert r.values["upstream.url"] == "${HOST}"
+        assert expanded_url() == "h"
+
+    def test_the_default_never_expands(self) -> None:
+        r = expanding(Setting("a", "${HOST}", "")).resolve(environ={"HOST": "h"}, layers=[])
+        assert r.values["a"] == "${HOST}"
+        assert expanded_url() == "h"
+
+    @pytest.mark.parametrize("bad", ["", "Error", "unset", None])
+    def test_expand_unset_is_validated(self, bad: Any) -> None:
+        with pytest.raises(ValueError, match=r'^expand_unset: "error" or "empty", not '):
+            Settings("APP_", (URL,), default_path=DEFAULT, expand_unset=bad)
+
+
+class TestExpansionSyntax:
+    @pytest.mark.parametrize(
+        ("written", "environ", "expected"),
+        [
+            ("${HOST}", {"HOST": "h"}, "h"),
+            ("https://${HOST}:${PORT}/x", {"HOST": "h", "PORT": "1"}, "https://h:1/x"),
+            ("${HOST:-d}", {}, "d"),
+            ("${HOST:-d}", {"HOST": ""}, "d"),
+            ("${HOST:-d}", {"HOST": "h"}, "h"),
+            ("${HOST:-}", {}, ""),
+            ("${HOST}", {"HOST": ""}, ""),
+            ("${_h1:-a b:c}", {}, "a b:c"),
+            ("$${HOST}", {"HOST": "h"}, "${HOST}"),
+            ("a$${HOST}${HOST}", {"HOST": "h"}, "a${HOST}h"),
+            ("$HOST $ $x} ${HOST}", {"HOST": "h"}, "$HOST $ $x} h"),
+            ("${HOST:-a}b}", {}, "ab}"),
+            ("${HOST:-${X}}", {"X": "x"}, "${X}"),
+        ],
+    )
+    def test_expands(
+        self, tmp_path: Path, written: str, environ: Mapping[str, str], expected: str
+    ) -> None:
+        r = expanding(URL).resolve(
+            environ=environ, layers=[layer({"upstream": {"url": written}}, expand=True)]
+        )
+        assert r.values["upstream.url"] == expected
+
+    @pytest.mark.parametrize(
+        ("written", "at"),
+        [("${HOST", 1), ("x${}", 2), ("${vars.x}", 1), ("${1A}", 1), ("${A:x}", 1), ("ok ${", 4)],
+    )
+    def test_any_other_dollar_brace_is_an_error(self, written: str, at: int) -> None:
+        with pytest.raises(ConfigError) as e:
+            expanding(URL).resolve(
+                environ={}, layers=[layer({"upstream": {"url": written}}, expand=True)]
+            )
+        assert str(e.value) == (
+            f"upstream.url: a ${{ at character {at} that isn't ${{NAME}} or ${{NAME:-default}} "
+            f"(from {ETC}): write $${{ for a literal ${{"
+        )
+
+    def test_unset_with_no_default_is_an_error(self, tmp_path: Path) -> None:
+        path = tmp_path / "config.yaml"
+        path.write_text("upstream: {url: 'https://${HOST}'}\n", encoding="utf-8")
+        with pytest.raises(ConfigError) as e:
+            expanding(URL).resolve(path, {})
+        assert (
+            str(e.value) == f"upstream.url: ${{HOST}} is not set and has no default (from {path})"
+        )
+
+    def test_unset_names_the_finer_origin(self) -> None:
+        payload = layer(
+            {"upstream": {"url": "${HOST}"}}, origins={"upstream.url": "line 3"}, expand=True
+        )
+        with pytest.raises(ConfigError, match=r"has no default \(from line 3\)$"):
+            expanding(URL).resolve(environ={}, layers=[payload])
+
+    def test_unset_with_empty_expands_to_the_empty_string(self, tmp_path: Path) -> None:
+        r = resolve_expanding(tmp_path, "upstream: {url: 'a${HOST}b'}\n", URL, expand_unset="empty")
+        assert r.values["upstream.url"] == "ab"
+
+    def test_the_environment_is_read_on_every_resolve(self, tmp_path: Path) -> None:
+        path = tmp_path / "config.yaml"
+        path.write_text("upstream: {url: '${HOST}'}\n", encoding="utf-8")
+        settings = expanding(URL)
+        assert settings.resolve(path, {"HOST": "a"}).values["upstream.url"] == "a"
+        assert settings.resolve(path, {"HOST": "b"}).values["upstream.url"] == "b"
+
+
+class TestExpansionScope:
+    def test_list_items_expand_and_keys_dont(self, tmp_path: Path) -> None:
+        text = "hosts: ['${A}', 'b', '${B:-c}', 7]\n"
+        r = resolve_expanding(tmp_path, text, HOSTS, environ={"A": "a"})
+        assert r.values["hosts"] == ("a", "b", "c", "7")
+        r = resolve_expanding(tmp_path, "hosts: '${A},x'\n", HOSTS, environ={"A": "a"})
+        assert r.values["hosts"] == ("a", "x")
+
+    def test_typing_comes_after(self, tmp_path: Path) -> None:
+        listen = "listen: {port: '${PORT:-5000}'}\n"
+        assert resolve_expanding(tmp_path, listen, PORT).values["listen.port"] == 5000
+        r = resolve_expanding(tmp_path, listen, PORT, environ={"PORT": ""})
+        assert r.values["listen.port"] == 5000
+        r = resolve_expanding(tmp_path, listen, PORT, environ={"PORT": "6000"})
+        assert r.values["listen.port"] == 6000
+        flag = Setting("debug", False, "")
+        r = resolve_expanding(tmp_path, "debug: '${DEBUG}'\n", flag, environ={"DEBUG": "yes"})
+        assert r.values["debug"] is True
+
+    def test_without_expand_the_coercion_error_shows_the_text(self, tmp_path: Path) -> None:
+        path = tmp_path / "config.yaml"
+        path.write_text("listen: {port: '${PORT:-5000}'}\n", encoding="utf-8")
+        with pytest.raises(ConfigError) as e:
+            make(PORT).resolve(path, {})
+        assert str(e.value) == f"listen.port: expected int, got '${{PORT:-5000}}' (from {path})"
+        assert expanding(PORT).resolve(path, {}).values["listen.port"] == 5000
+
+    def test_non_strings_are_untouched(self, tmp_path: Path) -> None:
+        text = "listen: {port: 5000}\nupstream: {url: '${HOST}'}\n"
+        r = resolve_expanding(tmp_path, text, PORT, URL, environ={"HOST": "h"})
+        assert dict(r.values) == {"listen.port": 5000, "upstream.url": "h"}
+
+    def test_an_unknown_key_never_expands(self, tmp_path: Path) -> None:
+        text = "upstream: {url: '${H}', urll: '${X'}\nother: '${NOPE}'\n"
+        r = resolve_expanding(tmp_path, text, URL, environ={"H": "x"})
+        assert r.values["upstream.url"] == "x"
+        assert [w.name for w in r.warnings] == ["upstream.urll", "other"]
+
+    def test_an_unread_setting_in_a_lower_layer_never_expands(self) -> None:
+        top = layer({"upstream": {"url": "${H}"}}, expand=True)
+        low = layer({"upstream": {"url": "${NOPE}"}}, expand=True)
+        r = expanding(URL).resolve(environ={"H": "x"}, layers=[top, low])
+        assert r.values["upstream.url"] == "x"
+
+    def test_a_mapping_expands_its_values_and_still_fails_typing_as_written(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "config.yaml"
+        path.write_text("upstream: {url: {'${K}': '${V}'}}\n", encoding="utf-8")
+        with pytest.raises(ConfigError, match=r"\$\{V\} is not set"):
+            expanding(URL).resolve(path, {"K": "k"})
+        with pytest.raises(ConfigError) as e:
+            expanding(URL).resolve(path, {"V": "v"})
+        assert (
+            str(e.value) == f"upstream.url: expected str, got {{'${{K}}': '${{V}}'}} (from {path})"
+        )
+
+    def test_an_alias_value_expands(self) -> None:
+        data = {"port": "${PORT}"}
+        r = expanding(OLD_PORT).resolve(environ={"PORT": "9000"}, layers=[layer(data, expand=True)])
+        assert r.values["listen.port"] == 9000
+
+    def test_an_alias_conflict_compares_expanded_typed_values(self) -> None:
+        data = {"listen": {"port": 9000}, "port": "${PORT}"}
+        r = expanding(OLD_PORT).resolve(environ={"PORT": "9000"}, layers=[layer(data, expand=True)])
+        assert r.values["listen.port"] == 9000
+        with pytest.raises(ConfigError) as e:
+            expanding(OLD_PORT).resolve(environ={"PORT": "9001"}, layers=[layer(data, expand=True)])
+        assert str(e.value) == (
+            f"listen.port: set as both 'listen.port' and its old name 'port' (from {ETC}), "
+            "to different values"
+        )
+        assert "9001" not in str(e.value)
+
+    def test_an_aliass_coercion_error_shows_its_text(self) -> None:
+        # The key's value expands (else it would be the error); the alias's fails as written.
+        data = {"listen": {"port": "${P}"}, "port": "${PORT}x"}
+        environ = {"P": "1", "PORT": "1"}
+        with pytest.raises(
+            ConfigError, match=r"^listen\.port: expected int, got '\$\{PORT\}x' \(from"
+        ):
+            expanding(OLD_PORT).resolve(environ=environ, layers=[layer(data, expand=True)])
+
+
+class TestExpansionMessages:
+    def test_a_coercion_error_shows_the_text_as_written(self, tmp_path: Path) -> None:
+        path = tmp_path / "config.yaml"
+        path.write_text("listen: {port: 'https://${HOST}:x'}\n", encoding="utf-8")
+        with pytest.raises(ConfigError) as e:
+            expanding(PORT).resolve(path, {"HOST": "internal.example"})
+        assert str(e.value) == f"listen.port: expected int, got 'https://${{HOST}}:x' (from {path})"
+        assert "internal.example" not in str(e.value)
+        path.write_text("listen: {port: '${PORT}'}\n", encoding="utf-8")
+        assert expanding(PORT).resolve(path, {"PORT": "1"}).values["listen.port"] == 1
+
+    def test_a_check_error_shows_the_text_as_written(self) -> None:
+        mode = Setting("mode", "", "", check=one_of("fast", "slow"))
+        data = {"mode": "${MODE}-ish"}
+        with pytest.raises(ConfigError) as e:
+            expanding(mode).resolve(environ={"MODE": VALUE}, layers=[layer(data, expand=True)])
+        assert str(e.value) == f"mode: expected one of fast, slow, got '${{MODE}}-ish' (from {ETC})"
+        # `one_of` replaces the value with its declared spelling, after expansion.
+        r = expanding(mode).resolve(
+            environ={"MODE": "FAST"}, layers=[layer({"mode": "${MODE}"}, expand=True)]
+        )
+        assert r.values["mode"] == "fast"
+
+    def test_an_int_check_error_shows_the_text_as_written(self) -> None:
+        listen = Setting("listen.port", 8080, "", check=port)
+        data = {"listen": {"port": "${PORT:-70000}"}}
+        with pytest.raises(ConfigError) as e:
+            expanding(listen).resolve(environ={}, layers=[layer(data, expand=True)])
+        assert str(e.value) == f"listen.port: ${{PORT:-70000}} is not a TCP port (from {ETC})"
+        # A value that didn't change in expansion shows as it is.
+        unchanged = {"listen": {"port": 70000}}
+        with pytest.raises(ConfigError, match=r"^listen\.port: 70000 is not a TCP port"):
+            expanding(listen).resolve(environ={}, layers=[layer(unchanged, expand=True)])
+
+    def test_a_list_check_error_shows_each_item_as_written(self) -> None:
+        def no_secret(value: Value) -> None:
+            raise ValueError(f"bad hosts {value!r}")
+
+        hosts = Setting("hosts", "", "", is_list=True, check=no_secret)
+        data = {"hosts": ["a", "${H}", "${EMPTY}"]}
+        with pytest.raises(ConfigError) as e:
+            expanding(hosts).resolve(
+                environ={"H": VALUE, "EMPTY": ""}, layers=[layer(data, expand=True)]
+            )
+        assert str(e.value) == f"hosts: bad hosts ('a', '${{H}}') (from {ETC})"
+        with pytest.raises(ConfigError) as e:
+            expanding(hosts).resolve(
+                environ={"H": VALUE}, layers=[layer({"hosts": "a,${H}"}, expand=True)]
+            )
+        assert str(e.value) == f"hosts: bad hosts ('a', '${{H}}') (from {ETC})"
+
+    def test_a_list_item_a_variable_split_is_masked(self) -> None:
+        def echo(value: Value) -> None:
+            raise ValueError(f"bad hosts {value!r}")
+
+        hosts = Setting("hosts", "", "", is_list=True, check=echo)
+        data = {"hosts": "a,${H}"}
+        with pytest.raises(ConfigError) as e:
+            expanding(hosts).resolve(environ={"H": "x,y-secret"}, layers=[layer(data, expand=True)])
+        assert str(e.value) == f"hosts: bad hosts ('a', '{MASK}', '{MASK}') (from {ETC})"
+
+    def test_no_variable_value_in_any_message(self, tmp_path: Path) -> None:
+        token = Setting("proxy.auth", "", "", secret=True, check=one_of("nope"))
+        cases: list[tuple[Setting, Any]] = [
+            (URL, "${PASS"),
+            (URL, "${NOPE}"),
+            (PORT, "https://user:${PASS}@host"),  # a non-secret value embedding a secret variable
+            (Setting("upstream.url", "", "", check=one_of("x")), "https://user:${PASS}@host"),
+            (token, "${PASS}"),
+            (token, "x${PASS}"),
+            (Setting("proxy.auth", 0, "", secret=False), "${PASS}"),
+        ]
+        for setting, written in cases:
+            data: dict[str, Any] = {}
+            node = data
+            *parents, leaf = setting.key.split(".")
+            for part in parents:
+                node = node.setdefault(part, {})
+            node[leaf] = written
+            with pytest.raises(ConfigError) as e:
+                expanding(setting).resolve(
+                    environ={"PASS": VALUE}, layers=[layer(data, expand=True)]
+                )
+            assert setting.key in str(e.value)
+            assert VALUE not in str(e.value) and "hunter2" not in str(e.value)
+
+    def test_a_secret_setting_written_as_a_variable(self) -> None:
+        token = Setting("proxy.auth", "", "", secret=True)
+        data = {"proxy": {"auth": "${API_TOKEN}"}}
+        r = expanding(token).resolve(
+            environ={"API_TOKEN": VALUE}, layers=[layer(data, expand=True)]
+        )
+        assert r.secret("proxy.auth").reveal() == VALUE
+        assert r.sources["proxy.auth"] == "file"
+        assert VALUE not in repr(r)
+
+    def test_a_secret_coercion_error_shows_nothing(self) -> None:
+        token = Setting("proxy.auth", "", "", secret=True)
+        data = {"proxy": {"auth": ["${API_TOKEN}"]}}
+        with pytest.raises(ConfigError) as e:
+            expanding(token).resolve(
+                environ={"API_TOKEN": VALUE}, layers=[layer(data, expand=True)]
+            )
+        assert str(e.value) == f"proxy.auth: expected str (from {ETC})"
+        plain = {"proxy": {"auth": "${API_TOKEN}"}}
+        r = expanding(token).resolve(
+            environ={"API_TOKEN": VALUE}, layers=[layer(plain, expand=True)]
+        )
+        assert r.secret("proxy.auth").reveal() == VALUE

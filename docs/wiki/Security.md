@@ -4,7 +4,9 @@
 
 interpose is a library: it opens no ports and makes no network calls. What it protects is **secret configuration values on their way into a process**: proxy credentials, CA keys and API tokens read from `_FILE` variables, the environment, a YAML file or a secrets directory. The threat is accidental disclosure through logs, error messages, tracebacks, `repr()` in a debugger or a status page. A process that can read its own memory or its secrets' files is out of scope, as is protecting the files themselves (file modes, Kubernetes RBAC).
 
-It trusts the files and environment it's pointed at. A config file can set any declared setting, so whoever can write it controls the consumer.
+It trusts the files and environment it's pointed at. A config file can set any declared setting, so whoever can write it controls the consumer. With `Settings(expand=True)`, the file can also read any of the process's environment variables into a setting through `${VAR}`; it is local configuration, so that is no more than its writer could already do.
+
+A `Layer` built from a remote payload (a control plane's managed config) is trusted less: **never set `expand=True` on one.** Expansion there would let the control plane read the instance's environment, secrets included, by sending `${API_TOKEN}` in a setting it later reads back. interpose can't tell a remote layer from a local one, so the rule is the project's to keep: `expand` defaults to false, and `read_file()` is the only place interpose sets it ([0009](https://github.com/metalayerlab/interpose/blob/main/docs/design/0009-settings-extensions.md), decision C).
 
 ## Secrets
 
@@ -13,6 +15,7 @@ It trusts the files and environment it's pointed at. A config file can set any d
 - **`secret=True` settings resolve to `Secret`**, which prints as `********` in `str()`, `repr()`, f-strings, `%`-formatting, logging and exception messages. Only `reveal()` gives the value: call it at the point of use, never earlier.
 - **Never `str()` a `Secret` to get its value**: you get `********`. That is a safe failure, but it's a bug.
 - **Error messages never hold a secret setting's value**: a coercion error names the key and type only, and a `check`'s reason has the value masked. A check can't replace a secret setting's value, and `Resolved.str()` (or any accessor but `secret()`) on a secret setting is a `TypeError`, so the mask can't be sent as a credential. YAML syntax errors give a position, never the offending line.
+- **Expansion and secrets.** A secret setting may be written `${API_TOKEN}` in an expanding file; it resolves to a `Secret` as any other. Variables and `_FILE` contents never expand, so a secret file holding `${` arrives as written. An expansion error names the key and the variable, never the variable's value or the text around it. A coercion error on an expanded value shows the text as written (`got 'https://user:${PASS}@host'`), not the expanded one, since a non-secret value can embed a secret variable; a check's reason has the expanded value replaced by the text as written, and for a secret setting, both show nothing. A check that echoes only part of its value (the host of a URL, say) can't be caught this way: a check should name the problem, not quote the value.
 - **Prefer `_FILE` for secrets** (Docker and Kubernetes secrets) over environment variables, which child processes inherit and `/proc/<pid>/environ` exposes. `read_secret_dir` reads a whole secrets directory for values that aren't settings.
 - Nothing is logged. `Resolved.sources` says where each value came from, and is safe to show.
 

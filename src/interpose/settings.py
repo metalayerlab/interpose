@@ -19,6 +19,11 @@ A setting may keep old names (`aliases`), read in each of those places alongside
 with a warning (design 0009). An unknown key in a layer, or a prefixed variable no setting reads, is
 still ignored, and gives a `ConfigWarning` on `Resolved.warnings` for the project to log. interpose
 itself never logs, prints or raises one.
+
+A project may opt in to ``${VAR}`` expansion in its config file (`Settings(..., expand=True)`,
+design 0009): ``${NAME}`` and ``${NAME:-default}`` in a value a setting reads from the file take the
+variable's value, before typing. Variables, ``_FILE`` contents and a `Layer` the project builds
+never expand, unless that layer says `expand=True`.
 """
 
 from __future__ import annotations
@@ -62,6 +67,11 @@ _FALSE = frozenset({"0", "false", "no", "off"})
 # What a str setting (or a list item) accepts from YAML: a scalar. A date is a scalar YAML types for
 # you (`2026-11-01`); its text is what was written.
 _SCALAR = (str, int, float, datetime.date)
+# One `${` in a value that expands (design 0009, section 4): the escape `$${`, a variable with an
+# optional `:-` default (literal text up to the first `}`), or, with no group, a `${` that is
+# neither: unclosed, or a name that isn't an environment variable's.
+_EXPANSION = re.compile(r"\$\$\{|\$\{(?:([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\})?")
+_UNSET = ("error", "empty")
 
 
 class ConfigError(Exception):
@@ -128,12 +138,17 @@ class Layer:
     `"control plane"`); `where` is what an error names (a path, `"control plane (config v12)"`).
     `origins` maps a dotted key to a finer `where` for that value. `resolve()` reads `data` and
     never changes or keeps it.
+
+    `expand` makes `${VAR}` in the values settings read from here expand. `read_file()` sets it to
+    the project's `Settings(expand=...)`, and is the only place interpose sets it. Never set it on a
+    layer built from a remote payload: it would let the sender read this process's environment.
     """
 
     data: Mapping[str, Any]
     source: str
     where: str
     origins: Mapping[str, str] = field(default_factory=dict)
+    expand: bool = False
 
 
 @dataclass(frozen=True)
@@ -205,6 +220,10 @@ class Settings(Sequence[Setting]):
 
     Iterating gives each `Setting` with `prefix` set, so `setting.env` is the full variable name.
     `extra_env` names prefixed variables the project reads itself, so they give no warning.
+
+    `expand=True` turns on `${VAR}` expansion in the config file (`read_file()` gives its layer
+    `expand=True`). A variable that is unset and has no default is a `ConfigError`, or with
+    `expand_unset="empty"`, the empty string.
     """
 
     def __init__(
@@ -214,7 +233,11 @@ class Settings(Sequence[Setting]):
         *,
         default_path: Path,
         extra_env: Iterable[str] = (),
+        expand: bool = False,
+        expand_unset: Literal["error", "empty"] = "error",
     ) -> None:
+        if expand_unset not in _UNSET:
+            raise ValueError(f'expand_unset: "error" or "empty", not {expand_unset!r}')
         bound: list[Setting] = []
         seen: set[str] = set()
         # Every variable name a setting reads, so no one variable feeds two settings
@@ -273,6 +296,8 @@ class Settings(Sequence[Setting]):
         self.default_path = default_path
         self.config_env = prefix + "CONFIG"
         self.extra_env = tuple(extra)
+        self.expand = expand
+        self.expand_unset: Literal["error", "empty"] = expand_unset
         self._settings = tuple(bound)
         # The names the unknown-key and unknown-variable checks accept (design 0009, section 2):
         # every key and alias, their parents, and every variable a setting or alias reads. Later
@@ -347,15 +372,18 @@ class Settings(Sequence[Setting]):
     def read_file(
         self, path: Path | None = None, environ: Mapping[str, str] | None = None
     ) -> Layer:
-        """The config file as a `Layer`: source `"file"`, `where` its path.
+        """The config file as a `Layer`: source `"file"`, `where` its path, `expand` the project's.
 
         `path` defaults to `<PREFIX>CONFIG`, else `default_path`; a missing file is an empty layer.
         `environ` defaults to `os.environ`. Raises `ConfigError` if it can't be read or parsed.
+        Nothing expands here: `resolve()` expands what each setting reads, with its `environ`.
         """
         env = os.environ if environ is None else environ
         if path is None:
             path = Path(env.get(self.config_env, str(self.default_path)))
-        return Layer(data=_read_yaml(path), source="file", where=str(path))
+        # The one place interpose sets `expand` (design 0009, decision C). A section's `_FILE`
+        # (step 5) will expand with the project's setting too.
+        return Layer(data=_read_yaml(path), source="file", where=str(path), expand=self.expand)
 
     def resolve(
         self,
@@ -381,7 +409,9 @@ class Settings(Sequence[Setting]):
         values: dict[str, Value] = {}
         sources: dict[str, str] = {}
         for setting in self._settings:
-            values[setting.key], sources[setting.key] = _resolve_one(setting, layers, env)
+            values[setting.key], sources[setting.key] = _resolve_one(
+                setting, layers, env, self.expand_unset
+            )
         warnings = [w for layer in layers for w in self._layer_warnings(layer)]
         warnings += self._env_warnings(env)
         return Resolved(
@@ -509,6 +539,7 @@ class _Found:
     source: str  # what `sources` says: a variable's name, a layer's `source`, "default"
     where: str | None  # for a layer's value, where errors say it came from; else None
     name: str  # what a same-level conflict names: the variable, or the key or alias
+    expand: bool = False  # from a layer with `expand=True`: never a variable or `_FILE`
 
     @property
     def origin(self) -> str:
@@ -530,7 +561,7 @@ def _found(setting: Setting, layers: Sequence[Layer], environ: Mapping[str, str]
         return [_Found(environ[var], var, None, var) for var in set_vars]
     for layer in layers:
         found = [
-            _Found(raw, layer.source, layer.origins.get(name, layer.where), name)
+            _Found(raw, layer.source, layer.origins.get(name, layer.where), name, layer.expand)
             for name in names
             if (raw := _lookup(layer.data, name)) is not None
         ]
@@ -550,15 +581,24 @@ def _read_file_variable(file_var: str, environ: Mapping[str, str]) -> str:
 
 
 def _resolve_one(
-    setting: Setting, layers: Sequence[Layer], environ: Mapping[str, str]
+    setting: Setting,
+    layers: Sequence[Layer],
+    environ: Mapping[str, str],
+    unset: Literal["error", "empty"] = "error",
 ) -> tuple[Value, str]:
     first, *others = _found(setting, layers, environ)
     source, where = first.source, first.where
-    value = _coerce(setting, first.raw, first.origin)
+    # Expansion comes once a level is chosen (an expanded value can't make a null fall through)
+    # and before typing, so `${PORT:-5000}` is the int 5000. Errors show the text as written.
+    expanded = _expanded(setting, first, environ, unset)
+    value = _coerce(setting, expanded, first.origin, first.raw)
     for other in others:
-        # The key and an alias (or two aliases) set at one level must agree once typed: neither
-        # can quietly win. The message names both, never either value.
-        if _coerce(setting, other.raw, other.origin) != value:
+        # The key and an alias (or two aliases) set at one level must agree once expanded and
+        # typed: neither can quietly win. The message names both, never either value.
+        other_value = _coerce(
+            setting, _expanded(setting, other, environ, unset), other.origin, other.raw
+        )
+        if other_value != value:
             place = "the environment" if other.where is None else other.where
             raise ConfigError(
                 f"{setting.key}: set as both {first.name!r} and its old name {other.name!r} "
@@ -574,6 +614,9 @@ def _resolve_one(
                 # quotes, control characters). A check shouldn't echo a secret at all.
                 for form in sorted({value, repr(value)[1:-1], ascii(value)[1:-1]}, key=len)[::-1]:
                     reason = reason.replace(form, MASK)
+            elif not setting.secret and expanded != first.raw:
+                # A non-secret value can embed a secret variable (`https://user:${PASS}@host`).
+                reason = _as_written(reason, value, first.raw, expanded)
             # A layer's value names where it came from; a variable's or the default's, as before,
             # names no source.
             origin = "" if where is None else f" (from {where})"
@@ -584,6 +627,104 @@ def _resolve_one(
         # Settings only allows str secrets, so the coerced value is a str.
         return Secret(str(value)), source
     return value, source
+
+
+def _expanded(
+    setting: Setting, found: _Found, environ: Mapping[str, str], unset: Literal["error", "empty"]
+) -> Any:
+    """`found.raw` with `${VAR}` expanded in every string in it, if it came from a layer that
+    expands; else as it is. Mapping keys and non-strings are untouched."""
+    if not found.expand:
+        return found.raw
+
+    def text(value: str) -> str:
+        return _expand_text(value, setting.key, found.origin, environ, unset)
+
+    return _expand_node(found.raw, text)
+
+
+def _expand_node(node: Any, text: Callable[[str], str]) -> Any:
+    if isinstance(node, str):
+        return text(node)
+    if isinstance(node, list):
+        return [_expand_node(item, text) for item in node]
+    if isinstance(node, Mapping):
+        return {key: _expand_node(child, text) for key, child in node.items()}
+    return node
+
+
+def _expand_text(
+    value: str,
+    key: str,
+    where: str,
+    environ: Mapping[str, str],
+    unset: Literal["error", "empty"],
+) -> str:
+    """One string with its `${NAME}`, `${NAME:-default}` and `$${` expanded (design 0009).
+
+    Errors name the key, the variable and where, never the variable's value or the text (a
+    secret setting may be written in the file)."""
+
+    def one(m: re.Match[str]) -> str:
+        if m.group(0) == "$${":
+            return "${"
+        name, default = m.group(1), m.group(2)
+        if name is None:
+            raise ConfigError(
+                f"{key}: a ${{ at character {m.start() + 1} that isn't ${{NAME}} or "
+                f"${{NAME:-default}} (from {where}): write $${{ for a literal ${{"
+            )
+        current = environ.get(name)
+        if default is not None and not current:  # unset or empty, as in the shell
+            return default
+        if current is None:
+            if unset == "empty":
+                return ""
+            raise ConfigError(f"{key}: ${{{name}}} is not set and has no default (from {where})")
+        return current
+
+    return _EXPANSION.sub(one, value)
+
+
+def _as_written(reason: str, value: _Plain, written: Any, expanded: Any) -> str:
+    """A check's `reason` with the expanded value in it replaced by the text as written.
+
+    A list's items are replaced one by one where the written and expanded items line up; an item
+    a variable split in two (`${HOSTS}` holding a comma) is masked instead."""
+    pairs: list[tuple[str, str]] = []
+    if isinstance(value, tuple):
+        if isinstance(written, str):
+            written, expanded = written.split(","), expanded.split(",")
+        if len(written) == len(expanded):
+            pairs = [
+                (e.strip(), w.strip())
+                for w, e in zip(written, expanded, strict=True)
+                if isinstance(w, str) and w != e
+            ]
+        else:
+            shown = {str(w).strip() for w in written}
+            pairs = [(item, MASK) for item in value if item not in shown]
+    else:
+        pairs = [(str(value), written)]
+    # An int or bool is replaced as a whole word only: 50 is not inside 500.
+    bounded = not isinstance(value, str | tuple)
+    for old, new in sorted(pairs, key=lambda pair: len(pair[0]), reverse=True):
+        if not old:
+            continue
+        forms = {
+            (old, new),
+            (repr(old)[1:-1], repr(new)[1:-1]),
+            (ascii(old)[1:-1], ascii(new)[1:-1]),
+        }
+        for form, replacement in sorted(forms, key=lambda f: len(f[0]), reverse=True):
+            pattern = rf"(?<!\w){re.escape(form)}(?!\w)" if bounded else re.escape(form)
+            reason = re.sub(pattern, _literal(replacement), reason)
+    return reason
+
+
+def _literal(text: str) -> Callable[[re.Match[str]], str]:
+    """A `re.sub` replacement that is `text` as it is: no backslash escapes or group references."""
+    return lambda _: text
 
 
 _Plain = str | int | bool | tuple[str, ...]  # a value before `secret=True` wraps it
@@ -609,8 +750,10 @@ def _replace(setting: Setting, value: _Plain, replacement: Value) -> _Plain:
     return cast(_Plain, replacement)
 
 
-def _coerce(setting: Setting, raw: Any, source: str) -> _Plain:
-    """Give raw (a string from a file or the environment, or a YAML value) the setting's type."""
+def _coerce(setting: Setting, raw: Any, source: str, written: Any = None) -> _Plain:
+    """Give raw (a string from a file or the environment, or a YAML value) the setting's type.
+
+    `written` is the value before expansion, which an error shows in raw's place."""
     result: str | int | bool | tuple[str, ...] | None
     if setting.is_list:
         kind = "list"
@@ -625,7 +768,8 @@ def _coerce(setting: Setting, raw: Any, source: str) -> _Plain:
         kind = "str"
         result = _as_str(raw)
     if result is None:
-        got = "" if setting.secret else f", got {raw!r}"
+        shown = raw if written is None else written
+        got = "" if setting.secret else f", got {shown!r}"
         raise ConfigError(f"{setting.key}: expected {kind}{got} (from {source})")
     return result
 
