@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.3](https://github.com/metalayerlab/interpose/compare/v0.4.2...v0.4.3) (2026-11-04)
+
+
+### 🐛 Bug Fixes
+
+* **settings:** a NaN in a section equals NaN, so a reload sees no change ([#59](https://github.com/metalayerlab/interpose/issues/59)) ([d20f575](https://github.com/metalayerlab/interpose/commit/d20f575011bfad25c9b3d88c334903bbfa2978f9))
+
+
+### 📚 Documentation
+
+* propose resolving relative secret_file paths (design 0010) ([#56](https://github.com/metalayerlab/interpose/issues/56)) ([10cb9db](https://github.com/metalayerlab/interpose/commit/10cb9dbbe241d5978e3cbc08dbdd7e5919448133))
+
 ## [0.4.2](https://github.com/metalayerlab/interpose/compare/v0.4.1...v0.4.2) (2026-11-04)
 
 
