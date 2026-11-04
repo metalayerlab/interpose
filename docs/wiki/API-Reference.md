@@ -140,7 +140,7 @@ r.str("upstream.token")
 
 - Hashable, and equal only to another `Section` with the same keys and values of the same types: `1`, `True` and `1.0` differ, and a `Section` is never equal to a `dict` (compare `dict(section)` for that). Key order doesn't matter. A reload compares old and new by equality.
 - `repr()` masks every `Secret` in it.
-- `Section(mapping)` freezes a mapping of that shape, for a check's replacement; a non-str key, or a value of another type, is a `TypeError`. It reads no files: `{secret_file: ...}` means a secret leaf only in configuration.
+- `Section(mapping)` freezes a mapping of that shape, for a check's replacement; a non-str key, or a value of another type, is a `TypeError`, and a mapping or list that holds itself is a `ValueError`. It reads no files: `{secret_file: ...}` means a secret leaf only in configuration.
 
 ```python
 SETTINGS = Settings(

@@ -3536,3 +3536,131 @@ class TestIndexedAliases:
             "schedule: set as both 'QBT_RULES_SCHEDULE_<N>_*' and its old name "
             "'QBT_RULES_JOBS_<N>_*' (from the environment), to different values"
         )
+
+
+# --- a value that holds itself (issue #48) -------------------------------------------------------
+
+
+def cycle_error(path: str, earlier: str, origin: str) -> str:
+    return (
+        f"{path}: refers back to {earlier}, which holds it, so it never ends: a YAML alias "
+        f"can't be inside its own anchor (from {origin})"
+    )
+
+
+class TestSectionCycles:
+    """A YAML alias inside its own anchor is a `ConfigError` naming the path, never the value,
+    found by identity rather than Python's recursion limit; one shared alias is no cycle."""
+
+    @pytest.mark.parametrize("expand", [False, True])
+    @pytest.mark.parametrize(
+        ("yaml_text", "path", "earlier"),
+        [
+            # A mapping inside itself, and the section itself inside itself.
+            (
+                "{a: &x {b: *x}}",
+                "middleware.config.a.b",
+                "middleware.config.a",
+            ),
+            ("&x {a: *x}", "middleware.config.a", "middleware.config"),
+            # A list inside itself: the issue's own case.
+            ("{a: &x [*x]}", "middleware.config.a[0]", "middleware.config.a"),
+            # Two levels down, through a list and a mapping.
+            (
+                "{a: {b: &x {c: [1, *x]}}}",
+                "middleware.config.a.b.c[1]",
+                "middleware.config.a.b",
+            ),
+        ],
+    )
+    def test_a_cycle_in_the_file_names_its_path(
+        self, tmp_path: Path, yaml_text: str, path: str, earlier: str, expand: bool
+    ) -> None:
+        text = f"middleware:\n  config: {yaml_text}\n"
+        config = tmp_path / "config.yaml"
+        with pytest.raises(ConfigError) as info:
+            (resolve_expanding if expand else resolve_yaml)(tmp_path, text, MW)
+        assert str(info.value) == cycle_error(path, earlier, str(config))
+
+    @pytest.mark.parametrize("expand", [False, True])
+    def test_a_cycle_in_a_sections_file_variable(self, tmp_path: Path, expand: bool) -> None:
+        mounted = tmp_path / "mw.yaml"
+        mounted.write_text("auth: &x {users: [a, *x]}\n", encoding="utf-8")
+        settings = expanding(MW) if expand else make(MW)
+        with pytest.raises(ConfigError) as info:
+            settings.resolve(DEFAULT, {"APP_MIDDLEWARE_CONFIG_FILE": str(mounted)})
+        assert str(info.value) == cycle_error(
+            "middleware.config.auth.users[1]",
+            "middleware.config.auth",
+            f"APP_MIDDLEWARE_CONFIG_FILE ({mounted})",
+        )
+
+    def test_a_cycle_in_a_project_layer(self) -> None:
+        looped: dict[str, Any] = {"k": 1}
+        looped["self"] = [looped]
+        data = {"middleware": {"config": {"a": looped}}}
+        with pytest.raises(ConfigError) as info:
+            make(MW).resolve(environ={}, layers=[control(data)])
+        assert str(info.value) == cycle_error(
+            "middleware.config.a.self[0]", "middleware.config.a", CONTROL
+        )
+
+    @pytest.mark.parametrize("expand", [False, True])
+    def test_a_cycle_in_a_list_sections_item(self, tmp_path: Path, expand: bool) -> None:
+        text = "reverse:\n  - &x {up: [*x]}\n"
+        with pytest.raises(ConfigError) as info:
+            (resolve_expanding if expand else resolve_yaml)(tmp_path, text, REVERSE)
+        assert str(info.value) == cycle_error(
+            "reverse[0].up[0]", "reverse[0]", str(tmp_path / "config.yaml")
+        )
+
+    @pytest.mark.parametrize("expand", [False, True])
+    def test_a_cycle_in_a_typed_items_section_field(self, tmp_path: Path, expand: bool) -> None:
+        text = "route:\n  - {listen: ':80', opts: &x {more: *x}}\n"
+        with pytest.raises(ConfigError) as info:
+            (resolve_expanding if expand else resolve_yaml)(tmp_path, text, ROUTE)
+        assert str(info.value) == cycle_error(
+            "route[0].opts.more", "route[0].opts", str(tmp_path / "config.yaml")
+        )
+
+    def test_a_cycle_in_an_expanding_list_setting(self, tmp_path: Path) -> None:
+        # Expansion walks a plain setting's list too; without it the list is just not a list of
+        # scalars.
+        with pytest.raises(ConfigError) as info:
+            resolve_expanding(tmp_path, "hosts: &x [a, *x]\n", HOSTS)
+        assert str(info.value) == cycle_error("hosts[1]", "hosts", str(tmp_path / "config.yaml"))
+
+    @pytest.mark.parametrize("expand", [False, True])
+    def test_a_shared_alias_is_no_cycle(self, tmp_path: Path, expand: bool) -> None:
+        text = (
+            "middleware:\n  config:\n"
+            "    a: &x {k: [1, {n: 2}]}\n    b: *x\n    c: [*x, *x]\n    d: {e: *x}\n"
+            "reverse:\n  - &y {up: [h]}\n  - *y\n"
+        )
+        r = (resolve_expanding if expand else resolve_yaml)(tmp_path, text, MW, REVERSE)
+        shared = Section({"k": [1, {"n": 2}]})
+        assert r.section("middleware.config") == Section(
+            {"a": shared, "b": shared, "c": [shared, shared], "d": {"e": shared}}
+        )
+        assert r.sections("reverse") == (Section({"up": ["h"]}),) * 2
+
+
+class TestSectionFreezeCycles:
+    def test_a_mapping_that_holds_itself_is_a_value_error(self) -> None:
+        looped: dict[str, Any] = {}
+        looped["a"] = {"b": looped}
+        with pytest.raises(ValueError, match="a Section can't hold itself"):
+            Section(looped)
+
+    def test_a_list_that_holds_itself_is_a_value_error(self) -> None:
+        looped: list[Any] = [1]
+        looped.append({"l": looped})
+        with pytest.raises(ValueError, match="a Section can't hold itself"):
+            Section({"a": looped})
+
+    def test_a_shared_value_freezes_each_time(self) -> None:
+        shared: dict[str, Any] = {"k": [1]}
+        items = [shared, shared]
+        s = Section({"a": shared, "b": shared, "c": items, "d": items})
+        assert s["a"] == s["b"] == Section({"k": [1]})
+        assert s["c"] == s["d"] == (Section({"k": [1]}),) * 2

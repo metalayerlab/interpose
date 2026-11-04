@@ -98,6 +98,10 @@ A section from a remote layer, such as a control plane's managed configuration, 
 
 A secret leaf names a file that is missing or unreadable by the process's user. A relative path is relative to the working directory. The message never shows the file's contents.
 
+### "middleware.config.a[0]: refers back to middleware.config.a, which holds it, so it never ends: ..."
+
+A YAML alias is inside its own anchor (`a: &x [*x]`, or `a: &x {b: *x}`), so the value holds itself and has no end. The message names the path where the alias is and the anchor's path it refers back to, never the value. Write the inner value out, or anchor something smaller. Using one anchor in several places (`b: *x` beside `a: &x {...}`) is fine. A project that builds `Section(...)` from such a mapping gets a `ValueError`.
+
 ### "middleware.config.true: a section's keys are strings, and this one is bool: quote it"
 
 YAML reads `on`, `no`, `null`, `1` and the like as a bool, `None` or a number, and a section's keys must be strings. Quote the key: `"on": ...`.

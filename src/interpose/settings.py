@@ -121,7 +121,8 @@ class Section(Mapping[str, Node]):
     can compare old and new. `repr()` masks every `Secret`.
 
     `Section(mapping)` freezes a mapping of the same shape (a check builds its replacement this
-    way): a non-str key, or a value of any other type, is a `TypeError`.
+    way): a non-str key, or a value of any other type, is a `TypeError`, and a mapping or list
+    that holds itself (at any depth) is a `ValueError`.
     """
 
     __slots__ = ("_hash", "_items", "_strict")
@@ -131,12 +132,7 @@ class Section(Mapping[str, Node]):
     _hash: int
 
     def __init__(self, mapping: Mapping[str, Any] | None = None) -> None:
-        items: dict[str, Node] = {}
-        for key, child in ({} if mapping is None else mapping).items():
-            if not isinstance(key, str):
-                raise TypeError(f"a Section's keys are str, not {type(key).__name__}")
-            items[key] = _freeze(child)
-        self._init(items)
+        self._init(_frozen_items({} if mapping is None else mapping, set()))
 
     @classmethod
     def _of(cls, items: dict[str, Node]) -> Section:
@@ -185,15 +181,36 @@ class Section(Mapping[str, Node]):
         return (Section, (dict(self._items),))
 
 
-def _freeze(node: object) -> Node:
+def _frozen_items(mapping: Mapping[Any, Any], active: set[int]) -> dict[str, Node]:
+    """A mapping's items for `Section(...)`, frozen. `active` holds the id of each mapping and
+    list the freeze is inside, so one that holds itself is found by identity, not by recursing
+    until Python's limit (issue #48); a value shared but not inside itself freezes each time."""
+    if id(mapping) in active:
+        raise ValueError("a Section can't hold itself: a mapping or list in it holds itself")
+    active.add(id(mapping))
+    items: dict[str, Node] = {}
+    for key, child in mapping.items():
+        if not isinstance(key, str):
+            raise TypeError(f"a Section's keys are str, not {type(key).__name__}")
+        items[key] = _freeze(child, active)
+    active.remove(id(mapping))
+    return items
+
+
+def _freeze(node: object, active: set[int]) -> Node:
     """A value for `Section(...)`, frozen: a mapping becomes a `Section`, a list or tuple a
     tuple."""
     if node is None or isinstance(node, Section | Secret | str | int | float | datetime.date):
         return cast(Node, node)  # bool is an int; datetime is a date
     if isinstance(node, Mapping):
-        return Section(node)
+        return Section._of(_frozen_items(node, active))
     if isinstance(node, list | tuple):
-        return tuple(_freeze(item) for item in node)
+        if id(node) in active:
+            raise ValueError("a Section can't hold itself: a mapping or list in it holds itself")
+        active.add(id(node))
+        frozen = tuple(_freeze(item, active) for item in node)
+        active.remove(id(node))
+        return frozen
     raise TypeError(f"a Section holds mappings, lists and scalars, not {type(node).__name__}")
 
 
@@ -1284,7 +1301,7 @@ def _section_of(setting: Setting, raw: Any, found: _Found) -> _Sections:
                 f"{setting.key}: expected a section (a mapping), got {_shape(raw)} "
                 f"(from {found.origin})"
             )
-        return _section_mapping(raw, setting.key, found)
+        return _section_mapping(raw, setting.key, found, {})
     if not isinstance(raw, list | tuple):
         raise ConfigError(
             f"{setting.key}: expected a list of sections (mappings), got {_shape(raw)} "
@@ -1297,7 +1314,7 @@ def _section_of(setting: Setting, raw: Any, found: _Found) -> _Sections:
             raise ConfigError(
                 f"{path}: expected a section (a mapping), got {_shape(item)} (from {found.origin})"
             )
-        items.append(_section_mapping(item, path, found))
+        items.append(_section_mapping(item, path, found, {}))
     return tuple(items)
 
 
@@ -1315,7 +1332,22 @@ def _is_secret_leaf(node: Mapping[Any, Any]) -> bool:
     return len(node) == 1 and "secret_file" in node
 
 
-def _section_mapping(node: Mapping[Any, Any], path: str, found: _Found) -> Section:
+def _enter(node: object, path: str, origin: str, active: dict[int, str]) -> None:
+    """Mark a mapping or list at `path` as one a walk is inside. `active` maps the id of each to
+    its path, so one met again inside itself (a YAML alias inside its own anchor: `a: &x [*x]`)
+    is found by identity, not by recursing until Python's limit (issue #48). A value shared but
+    not inside itself (one anchor, two aliases) is met only after the walk leaves it."""
+    if (earlier := active.get(id(node))) is not None:
+        raise ConfigError(
+            f"{path}: refers back to {earlier}, which holds it, so it never ends: a YAML alias "
+            f"can't be inside its own anchor (from {origin})"
+        )
+    active[id(node)] = path
+
+
+def _section_mapping(
+    node: Mapping[Any, Any], path: str, found: _Found, active: dict[int, str]
+) -> Section:
     if _is_secret_leaf(node):
         # Only a section itself, or a list section's item, gets here (a nested leaf is a
         # `_section_node`'s): it must be a mapping, not a Secret. Decision E's error comes first.
@@ -1324,6 +1356,7 @@ def _section_mapping(node: Mapping[Any, Any], path: str, found: _Found) -> Secti
             f"{path}: a section is a mapping, so a secret_file leaf goes under a key in it "
             f"(from {found.origin})"
         )
+    _enter(node, path, found.origin, active)
     items: dict[str, Node] = {}
     for key, child in node.items():
         if not isinstance(key, str):
@@ -1331,19 +1364,25 @@ def _section_mapping(node: Mapping[Any, Any], path: str, found: _Found) -> Secti
                 f"{path}.{_yaml_text(key)}: a section's keys are strings, and this one is "
                 f"{type(key).__name__}: quote it (from {found.origin})"
             )
-        items[key] = _section_node(child, f"{path}.{key}", found)
+        items[key] = _section_node(child, f"{path}.{key}", found, active)
+    del active[id(node)]
     return Section._of(items)
 
 
-def _section_node(node: Any, path: str, found: _Found) -> Node:
+def _section_node(node: Any, path: str, found: _Found, active: dict[int, str]) -> Node:
     if node is None or isinstance(node, Secret | str | int | float | datetime.date):
         return cast(Node, node)  # bool is an int; datetime is a date
     if isinstance(node, Mapping):
         if _is_secret_leaf(node):
             return _secret_leaf(node, path, found)
-        return _section_mapping(node, path, found)
+        return _section_mapping(node, path, found, active)
     if isinstance(node, list | tuple):
-        return tuple(_section_node(item, f"{path}[{i}]", found) for i, item in enumerate(node))
+        _enter(node, path, found.origin, active)
+        frozen = tuple(
+            _section_node(item, f"{path}[{i}]", found, active) for i, item in enumerate(node)
+        )
+        del active[id(node)]
+        return frozen
     raise ConfigError(
         f"{path}: a section holds mappings, lists and scalars, not {type(node).__name__} "
         f"(from {found.origin})"
@@ -1419,19 +1458,38 @@ def _expanded(
     def text(value: str) -> str:
         return _expand_text(value, setting.key, found.origin, environ, unset)
 
-    return _expand_node(found.raw, text)
+    return _expand_node(found.raw, text, setting.key, found.origin, {})
 
 
-def _expand_node(node: Any, text: Callable[[str], str]) -> Any:
+def _expand_node(
+    node: Any, text: Callable[[str], str], path: str, origin: str, active: dict[int, str]
+) -> Any:
+    """`node` with `text` applied to every string in it. A list or mapping that holds itself is
+    the freeze's `ConfigError`, found here first since expansion comes before the freeze."""
     if isinstance(node, str):
         return text(node)
-    if isinstance(node, list):
-        return [_expand_node(item, text) for item in node]
-    if isinstance(node, tuple):  # a project-built layer's section may hold tuples
-        return tuple(_expand_node(item, text) for item in node)
+    if not isinstance(node, list | tuple | Mapping):
+        return node
+    _enter(node, path, origin, active)
+    expanded: Any
     if isinstance(node, Mapping):
-        return {key: _expand_node(child, text) for key, child in node.items()}
-    return node
+        expanded = {
+            key: _expand_node(child, text, f"{path}.{_key_text(key)}", origin, active)
+            for key, child in node.items()
+        }
+    else:
+        items = (
+            _expand_node(item, text, f"{path}[{i}]", origin, active) for i, item in enumerate(node)
+        )
+        # A project-built layer's section may hold tuples.
+        expanded = list(items) if isinstance(node, list) else tuple(items)
+    del active[id(node)]
+    return expanded
+
+
+def _key_text(key: object) -> str:
+    """A mapping key as an error's path names it: a str as it is, another by its YAML text."""
+    return key if isinstance(key, str) else _yaml_text(key)
 
 
 def _expand_text(
