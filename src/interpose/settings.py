@@ -30,6 +30,10 @@ subtree at its key, deep-frozen as a `Section` (or, with `is_list=True`, a tuple
 ``<PREFIX><KEY>_FILE`` as a YAML file or from the layers; never from a plain variable. interpose
 checks only its shape. Inside a section, ``{secret_file: <path>}`` becomes a `Secret` holding that
 file, read only from local configuration (a `Layer` with `secret_files=True`).
+
+A list section may declare its item fields (`Setting(..., fields=(...))`, design 0009): each item
+is then a `Section` holding every field, each typed and checked as a setting, and the list may also
+come from indexed variables, ``<PREFIX><KEY>_<N>_<FIELD>`` (and its ``_FILE``) for ``N`` from 0.
 """
 
 from __future__ import annotations
@@ -65,6 +69,7 @@ __all__ = [
 ]
 
 _KEY = re.compile(r"[a-z0-9_]+(\.[a-z0-9_]+)*")
+_FIELD = re.compile(r"[a-z0-9_]+")  # a list section's field: a key of one part
 # ASCII digits only: int() would also take "1_000" and other scripts' digits.
 _INT = re.compile(r"[+-]?[0-9]+")
 _TRUE = frozenset({"1", "true", "yes", "on"})
@@ -87,10 +92,10 @@ class ConfigError(Exception):
 class ConfigWarning:
     """Something in the configuration that resolution ignored, for the project to log (design 0009).
 
-    `kind` is `"unknown"` for a key or prefixed variable no setting reads, or `"alias"` for a
-    setting's old name that is set, used or not (`"ignored"` is reserved for a later step). `name`
-    is the key or variable it is about (`"listen.prot"`, `"SLUICE_PORT"`); `message` is one line
-    naming keys, variables and where, never a value.
+    `kind` is `"unknown"` for a key, item field or prefixed variable no setting reads, `"alias"` for
+    a setting's old name that is set, used or not, or `"ignored"` for a list section's indexed
+    variable past the end of its list. `name` is the key or variable it is about (`"listen.prot"`,
+    `"SLUICE_PORT"`); `message` is one line naming keys, variables and where, never a value.
     """
 
     kind: Literal["unknown", "alias", "ignored"]
@@ -221,6 +226,12 @@ class Setting:
     `is_section` makes it a section (design 0009): its value is a `Section`, or with `is_list` a
     tuple of them, and its default must be `""` (empty). A section can't be `secret`, but may hold
     secret leaves. Its `check` gets the `Section` (or tuple) and may return another.
+
+    `fields` declares a list section's item fields, each a `Setting` with a one-part key, typed
+    and checked as a setting (a field may be secret, or a free-form section). Each item is then a
+    `Section` holding every field, and the list may come from indexed variables too,
+    `<PREFIX><KEY>_<N>_<FIELD>` and its `_FILE`, for N from 0. `required` (a field's only) makes a
+    missing field an error; a missing optional field takes its default.
     """
 
     key: str
@@ -232,6 +243,8 @@ class Setting:
     prefix: str = ""
     aliases: tuple[str, ...] = ()
     is_section: bool = False
+    fields: tuple[Setting, ...] = ()
+    required: bool = False
 
     @property
     def env(self) -> str:
@@ -241,6 +254,63 @@ class Setting:
 def _env_name(prefix: str, key: str) -> str:
     """The variable a dotted key is read from: `listen.port` is `<PREFIX>LISTEN_PORT`."""
     return prefix + key.upper().replace(".", "_")
+
+
+def _check_kind(label: str, setting: Setting) -> None:
+    """The flags and default agree: a section's or list's default is empty, a secret is a str
+    setting, and a section is never secret. Raises `ValueError` starting with `label`."""
+    if setting.is_section and setting.default != "":
+        raise ValueError(f'{label}: a section setting\'s default must be ""')
+    if setting.is_section and setting.secret:
+        # A Secret holds one string. A section holds secrets as secret leaves instead.
+        raise ValueError(f"{label}: a section can't be secret: use secret_file leaves in it")
+    if setting.is_list and setting.default != "":
+        raise ValueError(f'{label}: a list setting\'s default must be ""')
+    if setting.secret and (setting.is_list or not isinstance(setting.default, str)):
+        # A Secret holds one string; a secret int, bool or list has no masked form.
+        raise ValueError(f"{label}: a secret setting must be a str setting")
+
+
+def _check_fields(setting: Setting) -> None:
+    """A setting's `fields` and `required` (design 0009): only a list section has fields, each a
+    `Setting` with a one-part key of its own and no fields or aliases, and only a field is
+    `required`. No two fields read the same indexed variable (`x`'s _FILE is `x_file`'s)."""
+    label = repr(setting.key)
+    if setting.required:
+        raise ValueError(f"{label}: required is for a list section's field, not a setting")
+    if not isinstance(setting.fields, tuple):
+        raise ValueError(f"{label}: fields are a tuple of Setting")
+    if setting.fields and not (setting.is_section and setting.is_list):
+        raise ValueError(f"{label}: only a list section (is_section=True, is_list=True) has fields")
+    keys: set[str] = set()
+    suffixes: dict[str, str] = {}  # what a field's variable ends with -> the field
+    for item in setting.fields:
+        if not isinstance(item, Setting):
+            raise ValueError(f"{label}: a field is a Setting, not {type(item).__name__}")
+        where = f"{label}: field {item.key!r}"
+        if not _FIELD.fullmatch(item.key):
+            raise ValueError(f"{where}: a field's key is one lower-case word of [a-z0-9_]")
+        if not _is_yaml_str(item.key):
+            raise ValueError(f"{where}: YAML doesn't read {item.key!r} as a string")
+        if item.key in keys:
+            raise ValueError(f"{where}: declared twice")
+        if item.fields:
+            raise ValueError(f"{where}: a field can't have fields of its own")
+        if item.aliases:
+            raise ValueError(f"{where}: a field has no aliases")
+        _check_kind(where, item)
+        for suffix in _suffixes(item):
+            if suffix in suffixes:
+                raise ValueError(
+                    f"{where}: its variable <KEY>_<N>_{suffix} is also field {suffixes[suffix]!r}'s"
+                )
+            suffixes[suffix] = item.key
+        keys.add(item.key)
+
+
+def _suffixes(item: Setting) -> tuple[str, str]:
+    """What a field's indexed variables end with: `CRON` and `CRON_FILE`."""
+    return item.key.upper(), item.key.upper() + "_FILE"
 
 
 @dataclass(frozen=True)
@@ -409,18 +479,8 @@ class Settings(Sequence[Setting]):
                 if name in names:
                     raise ValueError(f"{setting.key!r}: {name} is also {names[name]}")
                 names[name] = f"read by {setting.key!r}"
-            if setting.is_section and setting.default != "":
-                raise ValueError(f'{setting.key!r}: a section setting\'s default must be ""')
-            if setting.is_section and setting.secret:
-                # A Secret holds one string. A section holds secrets as secret leaves instead.
-                raise ValueError(
-                    f"{setting.key!r}: a section can't be secret: use secret_file leaves in it"
-                )
-            if setting.is_list and setting.default != "":
-                raise ValueError(f'{setting.key!r}: a list setting\'s default must be ""')
-            if setting.secret and (setting.is_list or not isinstance(setting.default, str)):
-                # A Secret holds one string; a secret int, bool or list has no masked form.
-                raise ValueError(f"{setting.key!r}: a secret setting must be a str setting")
+            _check_kind(repr(setting.key), setting)
+            _check_fields(setting)
             seen.add(setting.key)
             bound.append(replace(setting, prefix=prefix))
         # A section owns its whole subtree: a key below it would be read as part of its value too,
@@ -459,6 +519,23 @@ class Settings(Sequence[Setting]):
             if name in names:
                 raise ValueError(f"extra_env {name!r}: already {names[name]}")
             extra.append(name)
+        # A list section with fields reads `<VAR>_<N>_<FIELD>` for its key's variable and each
+        # alias's: no other variable may have that form, or one name would feed two settings.
+        indexed: list[tuple[re.Pattern[str], str, str, Setting]] = []
+        for setting in bound:
+            if setting.fields:
+                for name in (setting.key, *setting.aliases):
+                    base = _env_name(prefix, name)
+                    pattern = re.compile(re.escape(base) + r"_([0-9]+)_(.+)")
+                    indexed.append((pattern, base, setting.env, setting))
+        taken = [*names.items(), *((name, "named in extra_env") for name in extra)]
+        for pattern, base, _, setting in indexed:
+            for name, what in taken:
+                if pattern.fullmatch(name):
+                    raise ValueError(
+                        f"{setting.key!r}: {name} is {what}, but has the form of "
+                        f"{base}_<N>_<FIELD>, the list's indexed variables"
+                    )
         self.prefix = prefix
         self.default_path = default_path
         self.config_env = prefix + "CONFIG"
@@ -469,9 +546,9 @@ class Settings(Sequence[Setting]):
         # The names the unknown-key and unknown-variable checks accept (design 0009, section 2):
         # every key and alias, their parents, and every variable a setting or alias reads. A
         # section's key (or alias) is a leaf, so nothing below it is checked: its content is the
-        # project's. List sections with fields (step 6) will add their indexed variables (an
-        # alias's too) and check items' fields. Suggestions come from current names only, never
-        # aliases.
+        # project's, except a list section's declared fields, checked in each item. A list section
+        # with fields reads its indexed variables (an alias's too), matched by `_indexed`.
+        # Suggestions come from current names only, never aliases.
         self._alias_of = MappingProxyType(alias_of)
         self._alias_env = MappingProxyType(alias_env)
         self._leaf_keys = frozenset(seen) | frozenset(alias_of)
@@ -479,6 +556,10 @@ class Settings(Sequence[Setting]):
         self._suggest_keys = _with_parents(seen)
         self._known_env = frozenset(names) | frozenset(extra)
         self._suggest_env = self._known_env - frozenset(alias_env)
+        self._indexed = tuple(indexed)
+        self._typed = MappingProxyType(
+            {name: s for s in bound if s.fields for name in (s.key, *s.aliases)}
+        )
 
     @staticmethod
     def _check_aliases(
@@ -577,7 +658,9 @@ class Settings(Sequence[Setting]):
         is a `ValueError`. Without `layers`, the file is the one layer (`read_file(path, environ)`).
 
         A section takes its `_FILE` (a YAML file), then the first layer that has it, then empty;
-        its plain variable is a `ConfigError`. Its secret leaves are read on every call.
+        its plain variable is a `ConfigError`. Its secret leaves are read on every call. A list
+        section with fields takes its indexed variables after its `_FILE`, replacing the layers'
+        list whole.
         """
         env = os.environ if environ is None else environ
         if layers is None:
@@ -587,17 +670,20 @@ class Settings(Sequence[Setting]):
         values: dict[str, Value] = {}
         sources: dict[str, str] = {}
         kinds: dict[str, str] = {}
+        # Unknown fields in a list section's _FILE, which no layer walk sees.
+        found_warnings: list[ConfigWarning] = []
         for setting in self._settings:
             if setting.is_section:
                 kinds[setting.key] = "list of sections" if setting.is_list else "section"
                 values[setting.key], sources[setting.key] = _resolve_section(
-                    setting, layers, env, self.expand, self.expand_unset
+                    setting, layers, env, self.expand, self.expand_unset, found_warnings
                 )
             else:
                 values[setting.key], sources[setting.key] = _resolve_one(
                     setting, layers, env, self.expand_unset
                 )
         warnings = [w for layer in layers for w in self._layer_warnings(layer)]
+        warnings += found_warnings
         warnings += self._env_warnings(env)
         return Resolved(
             values=MappingProxyType(values),
@@ -630,21 +716,65 @@ class Settings(Sequence[Setting]):
                 if child is not None:  # a null alias is unset, as for a key
                     where = layer.origins.get(path, layer.where)
                     yield _alias_warning(path, where, self._alias_of[path])
+                    if path in self._typed:
+                        yield from _unknown_fields(self._typed[path], path, where, child)
+            elif path in self._typed:
+                where = layer.origins.get(path, layer.where)
+                yield from _unknown_fields(self._typed[path], path, where, child)
             elif path not in self._leaf_keys and isinstance(child, Mapping):
                 yield from self._layer_warnings(layer, child, path)
 
     def _env_warnings(self, environ: Mapping[str, str]) -> Iterator[ConfigWarning]:
-        """By name, an `alias` warning for each alias variable that is set, and an `unknown` warning
+        """By name, an `alias` warning for each alias variable that is set, an `ignored` warning
+        for each list section's indexed variable past the end of its list, and an `unknown` warning
         for each prefixed variable no setting reads. Only names are read, never values. With no
-        prefix, every variable would be "prefixed": none is reported unknown, though aliases are."""
+        prefix, every variable would be "prefixed": none is reported unknown, though aliases and
+        ignored variables are."""
+        counts = {base: _item_count(s, base, environ) for _, base, _, s in self._indexed}
         for name in sorted(n for n in environ if n.startswith(self.prefix)):
             if name in self._alias_env:
                 yield _alias_warning(name, "the environment", self._alias_env[name])
-            elif self.prefix and name not in self._known_env:
+            elif name in self._known_env:
+                continue
+            elif (match := self._indexed_variable(name)) is not None:
+                yield from self._indexed_warnings(name, match, counts)
+            elif self.prefix:
                 message = f"unknown variable {name!r} in the environment"
                 yield ConfigWarning(
                     "unknown", name, message + _did_you_mean(name, self._suggest_env)
                 )
+
+    def _indexed_variable(self, name: str) -> tuple[str, str, Setting, str, str] | None:
+        """`(base, the key's base, setting, N, rest)` when `name` has the form of a list section's
+        indexed variable, `<base>_<N>_<rest>`, where base is its key's or an alias's variable."""
+        for pattern, base, current, setting in self._indexed:
+            if match := pattern.fullmatch(name):
+                return base, current, setting, match[1], match[2]
+        return None
+
+    def _indexed_warnings(
+        self, name: str, match: tuple[str, str, Setting, str, str], counts: Mapping[str, int]
+    ) -> Iterator[ConfigWarning]:
+        base, current, setting, index, rest = match
+        suffixes = sorted(suffix for item in setting.fields for suffix in _suffixes(item))
+        # N as written plainly: `_01_` is not item 1's. Never int() it: a name may hold more
+        # digits than int() converts.
+        plain = index.lstrip("0") or "0"
+        if rest in suffixes and index == plain:
+            if base != current:
+                yield _alias_warning(name, "the environment", current + name[len(base) :])
+            count = str(counts[base])
+            if (len(index), index) >= (len(count), count):  # N >= the item count
+                message = (
+                    f"ignored variable {name!r} in the environment: the list {setting.key!r} "
+                    f"ends before it, as no {base}_{count}_* is set"
+                )
+                yield ConfigWarning("ignored", name, message)
+        elif self.prefix:
+            # An unknown field, or an index written another way: suggest that item's variables.
+            peers = [f"{current}_{plain}_{suffix}" for suffix in suffixes]
+            message = f"unknown variable {name!r} in the environment"
+            yield ConfigWarning("unknown", name, message + _did_you_mean(name, peers))
 
 
 def _alias_warning(old: str, where: str, current: str) -> ConfigWarning:
@@ -732,6 +862,9 @@ class _Found:
     name: str  # what a same-level conflict names: the variable, or the key or alias
     expand: bool = False  # a layer's `expand`, or a section's `_FILE`: never a variable
     secret_files: bool = False  # secret leaves may be read: a layer's `secret_files`, or `_FILE`
+    # Indexed variables: for each item, what each field that is set holds, in field order.
+    items: tuple[Mapping[str, _Found], ...] | None = None
+    warn_fields: bool = False  # a list section's _FILE: its unknown fields warn as it is read
 
     @property
     def origin(self) -> str:
@@ -744,8 +877,8 @@ def _found(
 ) -> list[_Found]:
     """What the setting's key and aliases hold at the first level of the order where any is set:
     `_FILE`, then the variable, then each layer; else the default. The key comes first, then the
-    aliases in declaration order. (A list section's indexed variables, step 6, are one more level
-    the aliases share.)
+    aliases in declaration order. A list section with fields has its indexed variables as its
+    variable level, the key's and each alias's.
 
     A section's `_FILE` is a YAML file, which expands with the project's `expand`; its plain
     variable is never read, and setting it is a `ConfigError`."""
@@ -753,6 +886,12 @@ def _found(
     variables = [_env_name(setting.prefix, name) for name in names]
     if setting.is_section and (plain := [var for var in variables if var in environ]):
         # A mapping in a variable is unreadable (design 0009): say so, rather than ignore it.
+        if setting.fields:
+            raise ConfigError(
+                f"{setting.key}: {plain[0]} is set, but a list section is read from a YAML file "
+                f"or indexed variables: set {plain[0]}_FILE to the file's path, or "
+                f"{plain[0]}_<N>_<FIELD> for each item's fields"
+            )
         raise ConfigError(
             f"{setting.key}: {plain[0]} is set, but a section is read from a YAML file, never a "
             f"variable: set {plain[0]}_FILE to the file's path"
@@ -762,6 +901,10 @@ def _found(
         if setting.is_section:
             return [_read_section_file(setting, var, environ, expand) for var in files]
         return [_Found(_read_file_variable(var, environ), var, None, var) for var in files]
+    if setting.fields:
+        indexed = [_indexed_found(setting, var, environ, expand) for var in variables]
+        if found := [f for f in indexed if f is not None]:
+            return found
     if set_vars := [var for var in variables if var in environ]:
         return [_Found(environ[var], var, None, var) for var in set_vars]
     for layer in layers:
@@ -808,7 +951,57 @@ def _read_section_file(
     loaded = _parse_yaml(text, label)
     if loaded is None:
         loaded = [] if setting.is_list else {}
-    return _Found(loaded, file_var, label, file_var, expand, secret_files=True)
+    return _Found(
+        loaded,
+        file_var,
+        label,
+        file_var,
+        expand,
+        secret_files=True,
+        warn_fields=bool(setting.fields),
+    )
+
+
+def _item_count(setting: Setting, base: str, environ: Mapping[str, str]) -> int:
+    """How many items a list section's indexed variables under `base` hold: item N exists when
+    any of its field variables is set, and the first N with none ends the list."""
+    suffixes = [suffix for item in setting.fields for suffix in _suffixes(item)]
+    count = 0
+    while any(f"{base}_{count}_{suffix}" in environ for suffix in suffixes):
+        count += 1
+    return count
+
+
+def _indexed_found(
+    setting: Setting, base: str, environ: Mapping[str, str], expand: bool
+) -> _Found | None:
+    """A list section's items from `<base>_<N>_<FIELD>` and `_FILE` (design 0009), or None when
+    item 0 has none. Each field takes its `_FILE`, then its variable; a section field, only its
+    `_FILE` (a YAML file, as a section's)."""
+    rows: list[Mapping[str, _Found]] = []
+    for index in range(_item_count(setting, base, environ)):
+        row: dict[str, _Found] = {}
+        for item in setting.fields:
+            var = f"{base}_{index}_{item.key.upper()}"
+            if var + "_FILE" in environ:
+                if item.is_section:
+                    row[item.key] = _read_section_file(item, var + "_FILE", environ, expand)
+                else:
+                    text = _read_file_variable(var + "_FILE", environ)
+                    row[item.key] = _Found(text, var + "_FILE", var + "_FILE", var + "_FILE")
+            elif var in environ:
+                if item.is_section:
+                    raise ConfigError(
+                        f"{setting.key}[{index}].{item.key}: {var} is set, but a section is read "
+                        f"from a YAML file, never a variable: set {var}_FILE to the file's path"
+                    )
+                # `where` is the variable, so an error about the field names it.
+                row[item.key] = _Found(environ[var], var, var, var)
+        rows.append(row)
+    if not rows:
+        return None
+    name = f"{base}_<N>_*"
+    return _Found(None, name, None, name, items=tuple(rows))
 
 
 def _conflict(setting: Setting, first: _Found, other: _Found) -> ConfigError:
@@ -828,7 +1021,19 @@ def _resolve_one(
     unset: Literal["error", "empty"] = "error",
 ) -> tuple[Value, str]:
     first, *others = _found(setting, layers, environ)
-    source, where = first.source, first.where
+    return _typed(setting, first, others, environ, unset), first.source
+
+
+def _typed(
+    setting: Setting,
+    first: _Found,
+    others: Sequence[_Found],
+    environ: Mapping[str, str],
+    unset: Literal["error", "empty"],
+) -> Value:
+    """A setting's value from what its names hold at one level: expanded, coerced, agreeing
+    across names, checked, and wrapped in `Secret` for a secret setting."""
+    where = first.where
     # Expansion comes once a level is chosen (an expanded value can't make a null fall through)
     # and before typing, so `${PORT:-5000}` is the int 5000. Errors show the text as written.
     expanded = _expanded(setting, first, environ, unset)
@@ -862,8 +1067,8 @@ def _resolve_one(
             value = _replace(setting, value, replacement)
     if setting.secret:
         # Settings only allows str secrets, so the coerced value is a str.
-        return Secret(str(value)), source
-    return value, source
+        return Secret(str(value))
+    return value
 
 
 _Sections = Section | tuple[Section, ...]  # a section setting's value
@@ -875,24 +1080,40 @@ def _resolve_section(
     environ: Mapping[str, str],
     expand: bool,
     unset: Literal["error", "empty"],
+    warnings: list[ConfigWarning],
 ) -> tuple[Value, str]:
     """A section setting's value (design 0009, section 5): `_resolve_one`'s order, alias rule and
-    check, with a shape check and secret leaves in place of coercion."""
+    check, with a shape check and secret leaves in place of coercion. Unknown fields in a list
+    section's `_FILE` are added to `warnings`."""
     first, *others = _found(setting, layers, environ, expand)
-    expanded = _expanded(setting, first, environ, unset)
-    value = _section_of(setting, expanded, first)
+    return _sectioned(setting, first, others, environ, unset, warnings), first.source
+
+
+def _sectioned(
+    setting: Setting,
+    first: _Found,
+    others: Sequence[_Found],
+    environ: Mapping[str, str],
+    unset: Literal["error", "empty"],
+    warnings: list[ConfigWarning],
+) -> _Sections:
+    """A section's value from what its names hold at one level: shaped (or, with fields, each
+    item's fields typed), agreeing across names, and checked."""
+    value = _section_value(setting, first, environ, unset, warnings)
     for other in others:
-        if _section_of(setting, _expanded(setting, other, environ, unset), other) != value:
+        if _section_value(setting, other, environ, unset, warnings) != value:
             raise _conflict(setting, first, other)
     if setting.check is not None:
         try:
             replacement = setting.check(value)
         except ValueError as e:
             reason = str(e)
-            if expanded is not first.raw:
+            if first.expand:
                 # A leaf can embed a secret variable (`https://user:${PASS}@host`): show the text
                 # as written, as for any setting.
-                reason = _swap(reason, list(_changed_strings(first.raw, expanded)), bounded=False)
+                written = _read_part(setting, first.raw)
+                expanded = _expanded(setting, replace(first, raw=written), environ, unset)
+                reason = _swap(reason, list(_changed_strings(written, expanded)), bounded=False)
             # A check shouldn't echo a secret leaf at all; if it reveals one, it is masked.
             secrets = {
                 v for s in _secrets_in(value) if s for v in (s, repr(s)[1:-1], ascii(s)[1:-1])
@@ -903,7 +1124,137 @@ def _resolve_section(
             raise ConfigError(f"{setting.key}: {reason}{origin}") from None
         if replacement is not None:
             value = _section_replacement(setting, replacement)
-    return value, first.source
+    return value
+
+
+def _section_value(
+    setting: Setting,
+    found: _Found,
+    environ: Mapping[str, str],
+    unset: Literal["error", "empty"],
+    warnings: list[ConfigWarning],
+) -> _Sections:
+    if setting.fields:
+        return _typed_items(setting, found, environ, unset, warnings)
+    return _section_of(setting, _expanded(setting, found, environ, unset), found)
+
+
+def _read_part(setting: Setting, raw: Any) -> Any:
+    """What resolution reads of a section's raw value: all of it, or of a list section with
+    fields, each item's declared fields (an unknown field is never expanded or typed)."""
+    if not setting.fields or not isinstance(raw, list | tuple):
+        return raw
+    names = {item.key for item in setting.fields}
+    return [
+        {k: v for k, v in item.items() if k in names} if isinstance(item, Mapping) else item
+        for item in raw
+    ]
+
+
+def _typed_items(
+    setting: Setting,
+    found: _Found,
+    environ: Mapping[str, str],
+    unset: Literal["error", "empty"],
+    warnings: list[ConfigWarning],
+) -> tuple[Section, ...]:
+    """A list section's items, each a `Section` holding every declared field (design 0009): a
+    field that is set is typed and checked as a setting of its kind, a missing optional one takes
+    its default, and a missing required one is a `ConfigError`. Errors name the item's path."""
+    if found.source == "default":
+        return ()
+    if found.items is not None:
+        rows = found.items
+    else:
+        raw = found.raw
+        if not isinstance(raw, list | tuple):
+            raise ConfigError(
+                f"{setting.key}: expected a list of sections (mappings), got {_shape(raw)} "
+                f"(from {found.origin})"
+            )
+        built: list[Mapping[str, _Found]] = []
+        for index, item in enumerate(raw):
+            if not isinstance(item, Mapping):
+                raise ConfigError(
+                    f"{setting.key}[{index}]: expected a section (a mapping), got {_shape(item)} "
+                    f"(from {found.origin})"
+                )
+            # A null field is unset, as for a key.
+            built.append(
+                {
+                    f.key: replace(found, raw=item[f.key], warn_fields=False)
+                    for f in setting.fields
+                    if item.get(f.key) is not None
+                }
+            )
+        rows = tuple(built)
+        if found.warn_fields:
+            warnings.extend(_unknown_fields(setting, setting.key, found.origin, raw))
+    items: list[Section] = []
+    for index, row in enumerate(rows):
+        values: dict[str, Node] = {}
+        for item in setting.fields:
+            path = f"{setting.key}[{index}].{item.key}"
+            field_found = row.get(item.key)
+            if field_found is None:
+                if item.required:
+                    raise _missing(path, found, item, index, row)
+                field_found = _Found(item.default, "default", None, path)
+            values[item.key] = _field_value(replace(item, key=path), field_found, environ, unset)
+        items.append(Section._of(values))
+    return tuple(items)
+
+
+def _missing(
+    path: str, found: _Found, item: Setting, index: int, row: Mapping[str, _Found]
+) -> ConfigError:
+    """A required field an item doesn't set. From indexed variables, it names the variable and
+    one the item does set; from a layer or `_FILE`, where."""
+    if found.items is None:
+        return ConfigError(f"{path}: a required field, not set (from {found.origin})")
+    var = f"{found.name.removesuffix('_<N>_*')}_{index}_{item.key.upper()}"
+    other = next(iter(row.values())).name  # an item exists only when a field of it is set
+    return ConfigError(f"{path}: {var} is not set, but {other} is")
+
+
+def _field_value(
+    item: Setting, found: _Found, environ: Mapping[str, str], unset: Literal["error", "empty"]
+) -> Node:
+    """One field's value, `item.key` being its path (`schedule[2].cron`). A section field is a
+    free-form section; any other is typed as a setting. A `{secret_file: ...}` leaf is read for a
+    secret field, from local configuration only (decision E)."""
+    if item.is_section:
+        return _sectioned(item, found, (), environ, unset, [])
+    if isinstance(found.raw, Mapping) and _is_secret_leaf(found.raw):
+        _refuse_remote_secret_file(item.key, found)  # before anything else: never opened
+        if not item.secret:
+            raise ConfigError(
+                f"{item.key}: a secret_file leaf is read only for a secret field "
+                f"(from {found.origin})"
+            )
+        secret = _secret_leaf(_expanded(item, found, environ, unset), item.key, found)
+        # The file's contents never expand, as for a `_FILE`.
+        found = _Found(secret.reveal(), found.source, found.where, found.name)
+    return cast(Node, _typed(item, found, (), environ, unset))
+
+
+def _unknown_fields(setting: Setting, path: str, where: str, raw: Any) -> Iterator[ConfigWarning]:
+    """An `unknown` warning for each key in an item of a list section with fields that is no
+    field (design 0009, question 2: a warning), suggesting the closest field. Never a value."""
+    if not isinstance(raw, list | tuple):
+        return  # resolution reports the shape, if this is the value read
+    names = [item.key for item in setting.fields]
+    for index, item in enumerate(raw):
+        if not isinstance(item, Mapping):
+            continue
+        for part in item:
+            if isinstance(part, str) and part in names:
+                continue
+            text = part if isinstance(part, str) else _yaml_text(part)
+            name = f"{path}[{index}].{text}"
+            close = difflib.get_close_matches(text, names, n=1, cutoff=0.75)
+            hint = f": did you mean {f'{path}[{index}].{close[0]}'!r}?" if close else ""
+            yield ConfigWarning("unknown", name, f"unknown field {name!r} in {where}{hint}")
 
 
 def _section_replacement(setting: Setting, replacement: Value) -> _Sections:

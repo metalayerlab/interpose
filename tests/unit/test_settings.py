@@ -2928,3 +2928,611 @@ class TestSectionReload:
         rotated = settings.resolve(config, {}).section("middleware.config")
         assert rotated["t"] == Secret("rotated")
         assert rotated != first
+
+
+# --- typed list items and indexed variables (design 0009 step 6) ----------------------------------
+
+CRON = Setting("cron", "", "A 5-field cron expression.", required=True)
+CONTEXT = Setting("context", "", "The context to enqueue.", required=True)
+SCHEDULE = Setting(
+    "schedule", "", "Cron schedule.", is_section=True, is_list=True, fields=(CRON, CONTEXT)
+)
+ROUTE = Setting(
+    "route",
+    "",
+    "Routes.",
+    is_section=True,
+    is_list=True,
+    fields=(
+        Setting("listen", "", "Listen address.", required=True),
+        Setting("port", 80, "Port.", check=port),
+        Setting("tls", False, "TLS."),
+        Setting("hosts", "", "Hosts.", is_list=True),
+        Setting("token", "", "Token.", secret=True),
+        Setting("opts", "", "Options.", is_section=True),
+    ),
+)
+ROUTE_DEFAULTS: dict[str, Any] = {
+    "port": 80,
+    "tls": False,
+    "hosts": (),
+    "token": Secret(""),
+    "opts": Section(),
+}
+
+
+def route(**fields: Any) -> Section:
+    return Section({"listen": ":80", **ROUTE_DEFAULTS, **fields})
+
+
+def typed(key: str = "schedule", *fields: Setting, **kwargs: Any) -> Setting:
+    return Setting(key, "", "", is_section=True, is_list=True, fields=fields or (CRON,), **kwargs)
+
+
+class TestFieldDeclaration:
+    def test_the_records_example_is_accepted_and_public(self) -> None:
+        bound = make(SCHEDULE)[0]
+        assert [(f.key, f.required) for f in bound.fields] == [("cron", True), ("context", True)]
+        assert (Setting("a", "", "").fields, Setting("a", "", "").required) == ((), False)
+
+    @pytest.mark.parametrize(
+        "setting",
+        [
+            Setting("a", "", "", fields=(CRON,)),
+            Setting("a", "", "", is_list=True, fields=(CRON,)),
+            Setting("a", "", "", is_section=True, fields=(CRON,)),
+        ],
+    )
+    def test_fields_only_on_a_list_section(self, setting: Setting) -> None:
+        with pytest.raises(ValueError, match=r"^'a': only a list section \(is_section=True"):
+            make(setting)
+
+    @pytest.mark.parametrize(
+        "setting",
+        [Setting("a", "", "", required=True), typed("a", required=True)],
+    )
+    def test_required_only_on_a_field(self, setting: Setting) -> None:
+        with pytest.raises(ValueError, match=r"^'a': required is for a list section's field"):
+            make(setting)
+
+    def test_fields_are_a_tuple_of_settings(self) -> None:
+        with pytest.raises(ValueError, match="fields are a tuple of Setting"):
+            make(Setting("a", "", "", is_section=True, is_list=True, fields=[CRON]))  # type: ignore[arg-type]  # the wrong type on purpose
+        with pytest.raises(ValueError, match="a field is a Setting, not str"):
+            make(typed("a", "cron"))  # type: ignore[arg-type]  # the wrong type on purpose
+
+    @pytest.mark.parametrize(
+        ("field", "expected"),
+        [
+            (Setting("a.b", "", ""), "a field's key is one lower-case word of [a-z0-9_]"),
+            (Setting("Cron", "", ""), "a field's key is one lower-case word of [a-z0-9_]"),
+            (Setting("on", "", ""), "YAML doesn't read 'on' as a string"),
+            (typed("inner"), "a field can't have fields of its own"),
+            (Setting("x", "", "", aliases=("y",)), "a field has no aliases"),
+            (Setting("x", 1, "", is_section=True), 'a section setting\'s default must be ""'),
+            (Setting("x", 1, "", secret=True), "a secret setting must be a str setting"),
+        ],
+    )
+    def test_a_bad_field_is_rejected(self, field: Setting, expected: str) -> None:
+        with pytest.raises(ValueError) as info:
+            make(typed("s", field))
+        assert str(info.value) == f"'s': field {field.key!r}: {expected}"
+
+    def test_a_field_declared_twice(self) -> None:
+        with pytest.raises(ValueError, match=r"^'s': field 'cron': declared twice$"):
+            make(typed("s", CRON, Setting("cron", 1, "")))
+
+    def test_two_fields_cant_read_one_variable(self) -> None:
+        with pytest.raises(ValueError) as info:
+            make(typed("s", Setting("x", "", ""), Setting("x_file", "", "")))
+        assert str(info.value) == (
+            "'s': field 'x_file': its variable <KEY>_<N>_X_FILE is also field 'x''s"
+        )
+
+    @pytest.mark.parametrize(
+        ("other", "extra", "expected"),
+        [
+            (Setting("schedule_0_cron", "", ""), (), "APP_SCHEDULE_0_CRON is read by"),
+            (Setting("schedule_1", "", ""), (), "APP_SCHEDULE_1_FILE is read by"),
+            (Setting("x", "", "", aliases=("schedule_2_y",)), (), "APP_SCHEDULE_2_Y is read by"),
+            (None, ("APP_SCHEDULE_0_ANY",), "APP_SCHEDULE_0_ANY is named in extra_env"),
+        ],
+    )
+    def test_no_other_variable_may_have_the_indexed_form(
+        self, other: Setting | None, extra: tuple[str, ...], expected: str
+    ) -> None:
+        declared = (SCHEDULE,) if other is None else (SCHEDULE, other)
+        with pytest.raises(ValueError, match=f"^'schedule': {expected}") as info:
+            Settings("APP_", declared, default_path=DEFAULT, extra_env=extra)
+        assert str(info.value).endswith(
+            "but has the form of APP_SCHEDULE_<N>_<FIELD>, the list's indexed variables"
+        )
+
+    def test_nor_the_form_of_an_aliass_indexed_variables(self) -> None:
+        with pytest.raises(ValueError, match=r"APP_OLD_0_CRON is read by 'old_0_cron'.*APP_OLD_"):
+            make(typed("schedule", aliases=("old",)), Setting("old_0_cron", "", ""))
+
+    def test_names_that_only_look_alike_are_fine(self) -> None:
+        make(SCHEDULE, Setting("schedule_extra", "", ""), Setting("schedules_0_x", "", ""))
+
+
+class TestTypedItemsFromLayers:
+    def test_each_item_holds_every_field_typed(self, tmp_path: Path) -> None:
+        token = secret_file(tmp_path)
+        text = (
+            "route:\n"
+            "  - {listen: ':80'}\n"
+            "  - listen: ':443'\n"
+            "    port: '8443'\n"
+            "    tls: yes\n"
+            "    hosts: [a, b]\n"
+            f"    token: {{secret_file: {token}}}\n"
+            "    opts: {retries: 3, auth: {secret_file: " + str(token) + "}}\n"
+        )
+        r = resolve_yaml(tmp_path, text, ROUTE)
+        assert r.sections("route") == (
+            route(),
+            route(
+                listen=":443",
+                port=8443,
+                tls=True,
+                hosts=("a", "b"),
+                token=Secret(VALUE),
+                opts=Section({"retries": 3, "auth": Secret(VALUE)}),
+            ),
+        )
+        assert list(r.sections("route")[0]) == ["listen", "port", "tls", "hosts", "token", "opts"]
+        assert (r.sources["route"], r.warnings) == ("file", ())
+
+    def test_a_secret_field_written_inline_is_a_secret(self) -> None:
+        r = make(ROUTE).resolve(
+            environ={}, layers=[layer({"route": [{"listen": "x", "token": "t"}]})]
+        )
+        assert r.sections("route")[0]["token"] == Secret("t")
+
+    def test_an_empty_list_keeps_its_kind(self) -> None:
+        r = make(SCHEDULE).resolve(environ={}, layers=[layer({"schedule": []})])
+        assert r.sections("schedule") == ()
+        assert make(SCHEDULE).resolve(DEFAULT, {}).sections("schedule") == ()
+
+    @pytest.mark.parametrize("item", [{"cron": "* * * * *"}, {"cron": "x", "context": None}])
+    def test_a_missing_required_field_names_the_item_and_where(self, item: dict[str, Any]) -> None:
+        data = {"schedule": [{"cron": "a", "context": "b"}, item]}
+        with pytest.raises(ConfigError) as info:
+            make(SCHEDULE).resolve(environ={}, layers=[layer(data, origins={"schedule": "x.yaml"})])
+        assert str(info.value) == "schedule[1].context: a required field, not set (from x.yaml)"
+
+    def test_a_coercion_error_names_the_item_never_a_secret(self) -> None:
+        with pytest.raises(ConfigError) as info:
+            make(ROUTE).resolve(
+                environ={}, layers=[layer({"route": [{"listen": "x", "port": "y"}]})]
+            )
+        assert str(info.value) == f"route[0].port: expected int, got 'y' (from {ETC})"
+        with pytest.raises(ConfigError) as info:
+            make(ROUTE).resolve(
+                environ={}, layers=[layer({"route": [{"listen": "x", "token": [VALUE]}]})]
+            )
+        assert str(info.value) == f"route[0].token: expected str (from {ETC})"
+
+    def test_a_fields_check_runs_and_names_the_item(self) -> None:
+        with pytest.raises(ConfigError) as info:
+            make(ROUTE).resolve(environ={}, layers=[layer({"route": [{"listen": "x", "port": 0}]})])
+        assert str(info.value) == f"route[0].port: 0 is not a TCP port (from {ETC})"
+
+    def test_a_fields_check_may_replace_its_value(self) -> None:
+        level = Setting("level", "info", "", check=one_of("INFO", "DEBUG"))
+        r = make(typed("logs", level)).resolve(
+            environ={}, layers=[layer({"logs": [{}, {"level": "debug"}]})]
+        )
+        assert [item["level"] for item in r.sections("logs")] == ["INFO", "DEBUG"]
+
+    @pytest.mark.parametrize(
+        ("data", "expected"),
+        [
+            (
+                {"schedule": {"cron": "x"}},
+                "schedule: expected a list of sections (mappings), got a mapping",
+            ),
+            ({"schedule": ["x"]}, "schedule[0]: expected a section (a mapping), got str"),
+        ],
+    )
+    def test_the_wrong_shape_is_an_error(self, data: dict[str, Any], expected: str) -> None:
+        with pytest.raises(ConfigError) as info:
+            make(SCHEDULE).resolve(environ={}, layers=[layer(data)])
+        assert str(info.value) == f"{expected} (from {ETC})"
+
+    def test_the_lists_check_gets_the_typed_items(self) -> None:
+        seen: list[Value] = []
+        setting = typed("schedule", CRON, check=lambda v: seen.append(v))
+        make(setting).resolve(environ={}, layers=[layer({"schedule": [{"cron": "a"}]})])
+        assert seen == [(Section({"cron": "a"}),)]
+
+    def test_the_lists_check_error_shows_fields_as_written(self, tmp_path: Path) -> None:
+        def reject(value: Value) -> None:
+            raise ValueError(f"bad {cast(tuple[Section, ...], value)[0]['cron']}")
+
+        settings = Settings(
+            "APP_", (typed("schedule", CRON, check=reject),), default_path=DEFAULT, expand=True
+        )
+        path = tmp_path / "config.yaml"
+        path.write_text("schedule:\n  - {cron: '${C}', other: '${UNSET}'}\n", encoding="utf-8")
+        with pytest.raises(ConfigError) as info:
+            settings.resolve(path, {"C": "hunter2"})
+        assert str(info.value) == f"schedule: bad ${{C}} (from {path})"
+
+    def test_fields_expand_but_unknown_fields_never_do(self, tmp_path: Path) -> None:
+        settings = Settings("APP_", (SCHEDULE,), default_path=DEFAULT, expand=True)
+        path = tmp_path / "config.yaml"
+        path.write_text(
+            "schedule:\n  - {cron: '${C:-* * * * *}', context: '${X}', typo: '${UNSET}'}\n",
+            encoding="utf-8",
+        )
+        r = settings.resolve(path, {"X": "nightly"})
+        assert r.sections("schedule") == (Section({"cron": "* * * * *", "context": "nightly"}),)
+        with pytest.raises(ConfigError, match=r"^schedule\[0\]\.context: \$\{X\} is not set"):
+            settings.resolve(path, {})
+
+    def test_the_first_layer_with_the_list_wins_whole(self) -> None:
+        first = control({"schedule": [{"cron": "a", "context": "b"}]})
+        second = layer({"schedule": [{"cron": "c", "context": "d"}, {"cron": "e", "context": "f"}]})
+        r = make(SCHEDULE).resolve(environ={}, layers=[first, second])
+        assert r.sections("schedule") == (Section({"cron": "a", "context": "b"}),)
+
+    def test_an_alias_with_equal_or_different_items(self) -> None:
+        moved = typed("schedule", CRON, aliases=("jobs",))
+        same = {"schedule": [{"cron": "a"}], "jobs": [{"cron": "a", "typo": 1}]}
+        r = make(moved).resolve(environ={}, layers=[layer(same)])
+        assert r.sections("schedule") == (Section({"cron": "a"}),)
+        assert [(w.kind, w.name) for w in r.warnings] == [
+            ("alias", "jobs"),
+            ("unknown", "jobs[0].typo"),
+        ]
+        with pytest.raises(ConfigError, match="set as both 'schedule' and its old name 'jobs'"):
+            make(moved).resolve(
+                environ={}, layers=[layer({"schedule": [{"cron": "a"}], "jobs": [{"cron": "b"}]})]
+            )
+
+
+class TestTypedItemSecretLeaves:
+    """Decision E holds for fields: a leaf from a remote layer is refused and never read."""
+
+    opened = TestSecretLeavesFromRemoteLayers.opened
+
+    @pytest.mark.parametrize(
+        ("item", "path"),
+        [
+            ({"listen": "x", "token": {"secret_file": "TOKEN"}}, "route[0].token"),
+            ({"listen": "x", "port": {"secret_file": "TOKEN"}}, "route[0].port"),
+            ({"listen": "x", "opts": {"a": {"secret_file": "TOKEN"}}}, "route[0].opts.a"),
+        ],
+    )
+    def test_a_leaf_in_a_control_plane_item_is_refused_and_never_read(
+        self, tmp_path: Path, opened: list[str], item: dict[str, Any], path: str
+    ) -> None:
+        token = TestSecretLeavesFromRemoteLayers.token(tmp_path, opened)
+        payload = {"route": [_replace_leaf(item, str(token))]}
+        with pytest.raises(ConfigError) as info:
+            make(ROUTE).resolve(environ={}, layers=[control(payload)])
+        assert str(info.value) == (
+            f"{path}: secret files are read only from local configuration (the config file or a "
+            f"section's _FILE), not from {CONTROL}"
+        )
+        assert str(token) not in opened
+
+    def test_a_leaf_is_only_for_a_secret_field(self, tmp_path: Path) -> None:
+        token = secret_file(tmp_path)
+        data = {"route": [{"listen": {"secret_file": str(token)}}]}
+        with pytest.raises(ConfigError) as info:
+            make(ROUTE).resolve(environ={}, layers=[layer(data, secret_files=True)])
+        assert str(info.value) == (
+            f"route[0].listen: a secret_file leaf is read only for a secret field (from {ETC})"
+        )
+
+    def test_a_leafs_path_expands_but_its_contents_never_do(self, tmp_path: Path) -> None:
+        secret_file(tmp_path, "${HOME}\n")
+        data = {"route": [{"listen": "x", "token": {"secret_file": "${DIR}/token"}}]}
+        r = make(ROUTE).resolve(
+            environ={"DIR": str(tmp_path)}, layers=[layer(data, secret_files=True, expand=True)]
+        )
+        assert r.sections("route")[0]["token"] == Secret("${HOME}")
+
+
+class TestTypedItemsFromFileVariable:
+    def test_items_and_unknown_fields_from_the_lists_file(self, tmp_path: Path) -> None:
+        mounted = tmp_path / "schedule.yaml"
+        mounted.write_text("- {cron: a, context: b, contxt: c, 1: d}\n", encoding="utf-8")
+        environ = {"APP_SCHEDULE_FILE": str(mounted), "APP_SCHEDULE_0_CRON": "ignored"}
+        r = resolve_yaml(
+            tmp_path, "schedule: [{cron: x, context: y, extra: z}]\n", SCHEDULE, environ=environ
+        )
+        assert r.sections("schedule") == (Section({"cron": "a", "context": "b"}),)
+        assert r.sources["schedule"] == "APP_SCHEDULE_FILE"
+        label = f"APP_SCHEDULE_FILE ({mounted})"
+        assert [str(w) for w in r.warnings] == [
+            f"unknown field 'schedule[0].extra' in {tmp_path / 'config.yaml'}",
+            f"unknown field 'schedule[0].contxt' in {label}: did you mean 'schedule[0].context'?",
+            f"unknown field 'schedule[0].1' in {label}",
+        ]
+
+    def test_a_missing_field_in_it_names_the_file(self, tmp_path: Path) -> None:
+        mounted = tmp_path / "schedule.yaml"
+        mounted.write_text("- {cron: a}\n", encoding="utf-8")
+        with pytest.raises(ConfigError) as info:
+            make(SCHEDULE).resolve(DEFAULT, {"APP_SCHEDULE_FILE": str(mounted)})
+        assert str(info.value) == (
+            f"schedule[0].context: a required field, not set (from APP_SCHEDULE_FILE ({mounted}))"
+        )
+
+
+class TestTypedItemUnknownFields:
+    def test_an_unknown_field_warns_with_a_suggestion(self) -> None:
+        # Warned, never an error (design 0009, question 2), and ignored for resolution.
+        optional = typed("schedule", Setting("cron", "", ""), Setting("context", "", ""))
+        items = [{"cron": "a"}, {"cronn": "a", "zzz": 1}, {True: 1}]
+        r = make(optional).resolve(environ={}, layers=[layer({"schedule": items})])
+        assert [str(w) for w in r.warnings] == [
+            f"unknown field 'schedule[1].cronn' in {ETC}: did you mean 'schedule[1].cron'?",
+            f"unknown field 'schedule[1].zzz' in {ETC}",
+            f"unknown field 'schedule[2].true' in {ETC}",
+        ]
+        assert {w.kind for w in r.warnings} == {"unknown"}
+        assert [dict(item) for item in r.sections("schedule")] == [
+            {"cron": "a", "context": ""},
+            {"cron": "", "context": ""},
+            {"cron": "", "context": ""},
+        ]
+
+    def test_only_items_are_walked_and_a_misshapen_list_is_resolutions_to_report(self) -> None:
+        good = layer({"schedule": [{"cron": "a", "context": "b"}]})
+        odd = layer({"schedule": {"cronn": 1}}, where="odd.yaml")
+        mixed = layer({"schedule": ["x", {"x": 1}]}, where="mixed.yaml")
+        r = make(SCHEDULE).resolve(environ={}, layers=[good, odd, mixed])
+        assert [w.name for w in r.warnings] == ["schedule[1].x"]
+
+
+Q = "QBT_RULES_"
+
+
+def qbt(*settings: Setting) -> Settings:
+    return Settings(Q, settings or (SCHEDULE,), default_path=DEFAULT)
+
+
+class TestIndexedVariables:
+    def test_items_from_the_environment(self) -> None:
+        environ = {
+            "QBT_RULES_SCHEDULE_0_CRON": "0 * * * *",
+            "QBT_RULES_SCHEDULE_0_CONTEXT": "hourly",
+            "QBT_RULES_SCHEDULE_1_CRON": "0 0 * * *",
+            "QBT_RULES_SCHEDULE_1_CONTEXT": "nightly",
+        }
+        r = qbt().resolve(DEFAULT, environ)
+        assert r.sections("schedule") == (
+            Section({"cron": "0 * * * *", "context": "hourly"}),
+            Section({"cron": "0 0 * * *", "context": "nightly"}),
+        )
+        assert r.sources["schedule"] == "QBT_RULES_SCHEDULE_<N>_*"
+        assert r.warnings == ()
+
+    def test_they_replace_the_files_list_never_merge(self, tmp_path: Path) -> None:
+        config = tmp_path / "config.yaml"
+        config.write_text("schedule:\n  - {cron: a, context: b}\n  - {cron: c, context: d}\n")
+        environ = {"QBT_RULES_SCHEDULE_0_CRON": "x", "QBT_RULES_SCHEDULE_0_CONTEXT": "y"}
+        r = qbt().resolve(config, environ)
+        assert r.sections("schedule") == (Section({"cron": "x", "context": "y"}),)
+
+    def test_the_lists_file_variable_beats_them(self, tmp_path: Path) -> None:
+        mounted = tmp_path / "s.yaml"
+        mounted.write_text("[]\n", encoding="utf-8")
+        environ = {"QBT_RULES_SCHEDULE_FILE": str(mounted), "QBT_RULES_SCHEDULE_0_CRON": "x"}
+        r = qbt().resolve(DEFAULT, environ)
+        assert (r.sections("schedule"), r.sources["schedule"]) == ((), "QBT_RULES_SCHEDULE_FILE")
+
+    def test_each_field_typed_from_its_variable_or_file(self, tmp_path: Path) -> None:
+        token = secret_file(tmp_path)
+        opts = tmp_path / "opts.yaml"
+        opts.write_text(f"a: ${{X}}\nt: {{secret_file: {token}}}\n", encoding="utf-8")
+        settings = Settings("APP_", (ROUTE,), default_path=DEFAULT, expand=True)
+        environ = {
+            "APP_ROUTE_0_LISTEN": ":443",
+            "APP_ROUTE_0_PORT": "8443",
+            "APP_ROUTE_0_TLS": "on",
+            "APP_ROUTE_0_HOSTS": "a, b",
+            "APP_ROUTE_0_TOKEN": "plain is shadowed",
+            "APP_ROUTE_0_TOKEN_FILE": str(token),
+            "APP_ROUTE_0_OPTS_FILE": str(opts),
+            "APP_ROUTE_1_LISTEN": "${X}",
+            "X": "x",
+        }
+        r = settings.resolve(DEFAULT, environ)
+        assert r.sections("route") == (
+            route(
+                listen=":443",
+                port=8443,
+                tls=True,
+                hosts=("a", "b"),
+                token=Secret(VALUE),
+                opts=Section({"a": "x", "t": Secret(VALUE)}),
+            ),
+            route(listen="${X}"),  # a variable never expands
+        )
+        assert r.warnings == ()
+
+    def test_an_error_names_the_exact_variable(self, tmp_path: Path) -> None:
+        with pytest.raises(ConfigError) as info:
+            make(ROUTE).resolve(DEFAULT, {"APP_ROUTE_0_LISTEN": "x", "APP_ROUTE_0_PORT": "y"})
+        assert str(info.value) == "route[0].port: expected int, got 'y' (from APP_ROUTE_0_PORT)"
+        with pytest.raises(ConfigError) as info:
+            make(ROUTE).resolve(DEFAULT, {"APP_ROUTE_0_LISTEN": "x", "APP_ROUTE_0_PORT": "0"})
+        assert str(info.value) == "route[0].port: 0 is not a TCP port (from APP_ROUTE_0_PORT)"
+        missing = tmp_path / "missing"
+        with pytest.raises(
+            ConfigError, match=f"^cannot read APP_ROUTE_0_TOKEN_FILE \\({missing}\\)"
+        ):
+            make(ROUTE).resolve(DEFAULT, {"APP_ROUTE_0_TOKEN_FILE": str(missing)})
+
+    def test_a_section_field_from_a_plain_variable_is_an_error(self) -> None:
+        with pytest.raises(ConfigError) as info:
+            make(ROUTE).resolve(DEFAULT, {"APP_ROUTE_0_LISTEN": "x", "APP_ROUTE_0_OPTS": "{}"})
+        assert str(info.value) == (
+            "route[0].opts: APP_ROUTE_0_OPTS is set, but a section is read from a YAML file, "
+            "never a variable: set APP_ROUTE_0_OPTS_FILE to the file's path"
+        )
+
+    def test_the_lists_plain_variable_is_an_error_naming_both_forms(self) -> None:
+        with pytest.raises(ConfigError) as info:
+            qbt().resolve(DEFAULT, {"QBT_RULES_SCHEDULE": "x"})
+        assert str(info.value) == (
+            "schedule: QBT_RULES_SCHEDULE is set, but a list section is read from a YAML file or "
+            "indexed variables: set QBT_RULES_SCHEDULE_FILE to the file's path, or "
+            "QBT_RULES_SCHEDULE_<N>_<FIELD> for each item's fields"
+        )
+
+    def test_a_straggler_past_the_end_warns(self) -> None:
+        # qbt-rules ignored it silently; here it is an `ignored` warning (design 0009).
+        environ = {
+            "QBT_RULES_SCHEDULE_0_CRON": "a",
+            "QBT_RULES_SCHEDULE_0_CONTEXT": "b",
+            "QBT_RULES_SCHEDULE_2_CRON": "c",
+            "QBT_RULES_SCHEDULE_3_CONTEXT_FILE": "/nonexistent",
+        }
+        r = qbt().resolve(DEFAULT, environ)
+        assert r.sections("schedule") == (Section({"cron": "a", "context": "b"}),)
+        assert [(w.kind, str(w)) for w in r.warnings] == [
+            (
+                "ignored",
+                f"ignored variable 'QBT_RULES_SCHEDULE_{n}' in the environment: the list "
+                "'schedule' ends before it, as no QBT_RULES_SCHEDULE_1_* is set",
+            )
+            for n in ("2_CRON", "3_CONTEXT_FILE")
+        ]
+
+    def test_only_stragglers_set_leave_the_files_list(self, tmp_path: Path) -> None:
+        # No item 0, so the indexed list is empty and every variable is past its end: ignored,
+        # with a warning, and the file's list stands.
+        config = tmp_path / "config.yaml"
+        config.write_text("schedule: [{cron: a, context: b}]\n", encoding="utf-8")
+        r = qbt().resolve(config, {"QBT_RULES_SCHEDULE_1_CRON": "x"})
+        assert (r.sections("schedule"), r.sources["schedule"]) == (
+            (Section({"cron": "a", "context": "b"}),),
+            "file",
+        )
+        assert [(w.kind, w.name) for w in r.warnings] == [("ignored", "QBT_RULES_SCHEDULE_1_CRON")]
+        assert "no QBT_RULES_SCHEDULE_0_* is set" in str(r.warnings[0])
+
+    def test_a_lone_context_is_an_error_naming_both_variables(self) -> None:
+        # qbt-rules ended the list at the first missing _CRON; interpose can't know which field
+        # marks an item, so item 1 exists and its cron is missing (design 0009).
+        environ = {
+            "QBT_RULES_SCHEDULE_0_CRON": "a",
+            "QBT_RULES_SCHEDULE_0_CONTEXT": "b",
+            "QBT_RULES_SCHEDULE_1_CONTEXT": "c",
+        }
+        with pytest.raises(ConfigError) as info:
+            qbt().resolve(DEFAULT, environ)
+        assert str(info.value) == (
+            "schedule[1].cron: QBT_RULES_SCHEDULE_1_CRON is not set, but "
+            "QBT_RULES_SCHEDULE_1_CONTEXT is"
+        )
+
+    def test_the_variable_named_as_set_may_be_a_file(self, tmp_path: Path) -> None:
+        cron = tmp_path / "cron"
+        cron.write_text("a\n", encoding="utf-8")
+        with pytest.raises(ConfigError) as info:
+            qbt().resolve(DEFAULT, {"QBT_RULES_SCHEDULE_0_CRON_FILE": str(cron)})
+        assert str(info.value) == (
+            "schedule[0].context: QBT_RULES_SCHEDULE_0_CONTEXT is not set, but "
+            "QBT_RULES_SCHEDULE_0_CRON_FILE is"
+        )
+
+    def test_an_optional_field_takes_its_default(self) -> None:
+        r = make(ROUTE).resolve(DEFAULT, {"APP_ROUTE_0_LISTEN": ":80"})
+        assert r.sections("route") == (route(),)
+
+    @pytest.mark.parametrize(
+        ("name", "suggestion"),
+        [
+            ("QBT_RULES_SCHEDULE_0_CRONN", "QBT_RULES_SCHEDULE_0_CRON"),
+            ("QBT_RULES_SCHEDULE_01_CRON", "QBT_RULES_SCHEDULE_1_CRON"),
+            ("QBT_RULES_SCHEDULE_0_ZZZZZZZZZZZZ", None),
+        ],
+    )
+    def test_an_unknown_indexed_variable_warns_with_a_suggestion(
+        self, name: str, suggestion: str | None
+    ) -> None:
+        environ = {"QBT_RULES_SCHEDULE_0_CRON": "a", "QBT_RULES_SCHEDULE_0_CONTEXT": "b", name: ""}
+        r = qbt().resolve(DEFAULT, environ)
+        hint = "" if suggestion is None else f": did you mean {suggestion!r}?"
+        assert [(w.kind, str(w)) for w in r.warnings] == [
+            ("unknown", f"unknown variable {name!r} in the environment{hint}")
+        ]
+
+    def test_an_index_of_any_length_is_compared_never_converted(self) -> None:
+        huge = "9" * 5000  # more digits than int() converts
+        environ = {f"QBT_RULES_SCHEDULE_{huge}_CRON": "a", f"QBT_RULES_SCHEDULE_0{huge}_CRON": "a"}
+        r = qbt().resolve(DEFAULT, environ)
+        assert [w.kind for w in r.warnings] == ["unknown", "ignored"]
+        assert r.warnings[0].message.endswith(f"did you mean 'QBT_RULES_SCHEDULE_{huge}_CRON'?")
+
+    @pytest.mark.parametrize(("items", "index"), [(2, "10"), (10, "11"), (10, "100")])
+    def test_past_the_end_compares_as_numbers(self, items: int, index: str) -> None:
+        # "10" sorts before "2" as text, but item 10 is past a 2-item list's end.
+        environ = {f"QBT_RULES_SCHEDULE_{n}_CRON": "a" for n in range(items)}
+        environ |= {f"QBT_RULES_SCHEDULE_{n}_CONTEXT": "b" for n in range(items)}
+        environ[f"QBT_RULES_SCHEDULE_{index}_CRON"] = "c"
+        r = qbt().resolve(DEFAULT, environ)
+        assert len(r.sections("schedule")) == items
+        assert [(w.kind, w.name) for w in r.warnings] == [
+            ("ignored", f"QBT_RULES_SCHEDULE_{index}_CRON")
+        ]
+
+    def test_with_no_prefix_stragglers_still_warn(self) -> None:
+        settings = Settings("", (SCHEDULE,), default_path=DEFAULT)
+        environ = {"SCHEDULE_1_CRON": "a", "SCHEDULE_0_CRONN": "a", "OTHER": "x"}
+        r = settings.resolve(DEFAULT, environ)
+        assert [(w.kind, w.name) for w in r.warnings] == [("ignored", "SCHEDULE_1_CRON")]
+
+
+class TestIndexedAliases:
+    MOVED = Setting(
+        "schedule", "", "", is_section=True, is_list=True, fields=(CRON, CONTEXT), aliases=("jobs",)
+    )
+
+    def test_an_aliass_indexed_variables_are_read_with_a_warning(self) -> None:
+        environ = {"QBT_RULES_JOBS_0_CRON": "a", "QBT_RULES_JOBS_0_CONTEXT": "b"}
+        r = qbt(self.MOVED).resolve(DEFAULT, environ)
+        assert r.sections("schedule") == (Section({"cron": "a", "context": "b"}),)
+        assert r.sources["schedule"] == "QBT_RULES_JOBS_<N>_*"
+        assert r.warnings == tuple(
+            alias_warning(f"QBT_RULES_JOBS_0_{f}", "the environment", f"QBT_RULES_SCHEDULE_0_{f}")
+            for f in ("CONTEXT", "CRON")
+        )
+
+    def test_an_aliass_straggler_warns_twice(self) -> None:
+        r = qbt(self.MOVED).resolve(DEFAULT, {"QBT_RULES_JOBS_1_CRON": "a"})
+        assert [(w.kind, w.name) for w in r.warnings] == [
+            ("alias", "QBT_RULES_JOBS_1_CRON"),
+            ("ignored", "QBT_RULES_JOBS_1_CRON"),
+        ]
+
+    def test_an_unknown_alias_variable_suggests_the_current_name(self) -> None:
+        r = qbt(self.MOVED).resolve(DEFAULT, {"QBT_RULES_JOBS_0_CRONN": "a"})
+        assert [str(w) for w in r.warnings] == [
+            "unknown variable 'QBT_RULES_JOBS_0_CRONN' in the environment: "
+            "did you mean 'QBT_RULES_SCHEDULE_0_CRON'?"
+        ]
+
+    def test_key_and_alias_set_alike_are_fine_and_differently_an_error(self) -> None:
+        both = {
+            "QBT_RULES_SCHEDULE_0_CRON": "a",
+            "QBT_RULES_SCHEDULE_0_CONTEXT": "b",
+            "QBT_RULES_JOBS_0_CRON": "a",
+            "QBT_RULES_JOBS_0_CONTEXT": "b",
+        }
+        r = qbt(self.MOVED).resolve(DEFAULT, both)
+        assert r.sources["schedule"] == "QBT_RULES_SCHEDULE_<N>_*"
+        with pytest.raises(ConfigError) as info:
+            qbt(self.MOVED).resolve(DEFAULT, {**both, "QBT_RULES_JOBS_0_CONTEXT": "c"})
+        assert str(info.value) == (
+            "schedule: set as both 'QBT_RULES_SCHEDULE_<N>_*' and its old name "
+            "'QBT_RULES_JOBS_<N>_*' (from the environment), to different values"
+        )
