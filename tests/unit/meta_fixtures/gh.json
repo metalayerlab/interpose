@@ -1,0 +1,74 @@
+{
+ "calls": {
+  "api repos/metalayerlab/mitm-proxy/contents/pyproject.toml --jq .content": {
+   "exit": 0,
+   "stdout": "W3Byb2plY3RdCm5hbWUgPSAibWl0bS1wcm94eSIKIyBPd25lZCBieSByZWxl\nYXNlLXBsZWFzZTogbmV2ZXIgZWRpdCBieSBoYW5kIChzZWUgdGhlIHdpa2kn\ncyBSZWxlYXNlLVByb2Nlc3MgcGFnZSkuCnZlcnNpb24gPSAiMC4zLjIiCmRl\nc2NyaXB0aW9uID0gIkFzeW5jIFB5dGhvbiBNSVRNIHByb3h5IHdpdGggYSBz\nZWxmLXNpZ25lZCBDQSDigJQgSFRUUC8xLjEgJiBIVFRQLzIsIHBsdWdnYWJs\nZSBtaWRkbGV3YXJlIGZvciBpbnNwZWN0aW5nIGFuZCByZXdyaXRpbmcgdHJh\nZmZpYyBpbiBmbGlnaHQuIgpyZWFkbWUgPSAiUkVBRE1FLm1kIgpyZXF1aXJl\ncy1weXRob24gPSAiPj0zLjEzIgpsaWNlbnNlID0gIlVubGljZW5zZSIKZGVw\nZW5kZW5jaWVzID0gWwogICAgImludGVycG9zZSBAIGdpdCtodHRwczovL2dp\ndGh1Yi5jb20vbWV0YWxheWVybGFiL2ludGVycG9zZUB2MC40LjEiLAogICAg\nInB5eWFtbD49Ni4wIiwKICAgICJ0eXBlcj49MC4xNSIsCiAgICAiZmFzdGFw\naT49MC4xMTUiLAogICAgInV2aWNvcm4+PTAuMzQiLAogICAgImgyPj00LjQu\nMSIsCiAgICAiaDExPj0wLjE2LjAiLAogICAgImNyeXB0b2dyYXBoeT49NTAu\nMC4yIiwKXQoKW3Byb2plY3Quc2NyaXB0c10KbWl0bS1wcm94eSA9ICJtaXRt\nX3Byb3h5LmNsaTptYWluIgoKW3Byb2plY3QudXJsc10KSG9tZXBhZ2UgPSAi\naHR0cHM6Ly9naXRodWIuY29tL21ldGFsYXllcmxhYi9taXRtLXByb3h5IgpE\nb2N1bWVudGF0aW9uID0gImh0dHBzOi8vZ2l0aHViLmNvbS9tZXRhbGF5ZXJs\nYWIvbWl0bS1wcm94eS93aWtpIgpDaGFuZ2Vsb2cgPSAiaHR0cHM6Ly9naXRo\ndWIuY29tL21ldGFsYXllcmxhYi9taXRtLXByb3h5L2Jsb2IvbWFpbi9DSEFO\nR0VMT0cubWQiCgpbZGVwZW5kZW5jeS1ncm91cHNdCmRldiA9IFsKICAgICJt\neXB5Pj0xLjE1IiwKICAgICJweXRlc3Q+PTguMyIsCiAgICAicHl0ZXN0LWNv\ndj49Ni4wIiwKICAgICJydWZmPj0wLjExIiwKICAgICJ0eXBlcy1weXlhbWwi\nLAogICAgImh0dHB4Mj49Mi4wIiwKXQoKW2J1aWxkLXN5c3RlbV0KcmVxdWly\nZXMgPSBbImhhdGNobGluZyJdCmJ1aWxkLWJhY2tlbmQgPSAiaGF0Y2hsaW5n\nLmJ1aWxkIgoKW3Rvb2wuaGF0Y2guYnVpbGQudGFyZ2V0cy53aGVlbF0KcGFj\na2FnZXMgPSBbInNyYy9taXRtX3Byb3h5Il0KClt0b29sLmhhdGNoLm1ldGFk\nYXRhXQojIGludGVycG9zZSBpcyBwaW5uZWQgYnkgaXRzIGdpdCBVUkwsIG5v\ndCBQeVBJICh0ZW1wbGF0ZS1weXRob24gZGVjaXNpb24gMDAwMykKYWxsb3ct\nZGlyZWN0LXJlZmVyZW5jZXMgPSB0cnVlCgpbdG9vbC5ydWZmXQpsaW5lLWxl\nbmd0aCA9IDEwMAp0YXJnZXQtdmVyc2lvbiA9ICJweTMxMyIKClt0b29sLnJ1\nZmYubGludF0Kc2VsZWN0ID0gWyJFIiwgIkYiLCAiVyIsICJJIiwgIkIiLCAi\nVVAiLCAiU0lNIiwgIlJVRiIsICJTIiwgIlQyMCJdCgpbdG9vbC5ydWZmLmxp\nbnQucGVyLWZpbGUtaWdub3Jlc10KIyBhc3NlcnQgaXMgaG93IHB5dGVzdCBj\naGVja3M7IHNjcmlwdHMgcHJpbnQsIGFuZCBydW4gZ2l0LCBieSBkZXNpZ24u\nCiJ0ZXN0cy8qIiA9IFsiUzEwMSJdCiJzY3JpcHRzLyoiID0gWyJUMjAiLCAi\nUzYwMyIsICJTNjA3Il0KClt0b29sLm15cHldCnN0cmljdCA9IHRydWUKZmls\nZXMgPSBbInNyYy9taXRtX3Byb3h5IiwgInRlc3RzIiwgInNjcmlwdHMiXQoK\nW3Rvb2wucHl0ZXN0LmluaV9vcHRpb25zXQphZGRvcHRzID0gIi1xIC0tc3Ry\naWN0LW1hcmtlcnMgLS1zdHJpY3QtY29uZmlnIC0tY292IC0tY292LXJlcG9y\ndD10ZXJtLW1pc3Npbmc6c2tpcC1jb3ZlcmVkIgp0ZXN0cGF0aHMgPSBbInRl\nc3RzIl0KbWFya2VycyA9IFsiaW50ZWdyYXRpb246IHRhbGtzIHRvIHJlYWwg\nZXh0ZXJuYWwgc3lzdGVtczsgZGVzZWxlY3Qgd2l0aCAtbSAnbm90IGludGVn\ncmF0aW9uJyJdCiMgQSBkZXByZWNhdGlvbiBmYWlscyB0aGUgZGVwZW5kZW5j\neSBidW1wIHRoYXQgYnJpbmdzIGl0LCBub3QgYSBsYXRlciBydW4uCmZpbHRl\ncndhcm5pbmdzID0gWyJlcnJvciJdCgpbdG9vbC5jb3ZlcmFnZS5ydW5dCnNv\ndXJjZSA9IFsibWl0bV9wcm94eSJdCm9taXQgPSBbIiovX19tYWluX18ucHki\nXQpicmFuY2ggPSB0cnVlCgpbdG9vbC5jb3ZlcmFnZS5yZXBvcnRdCmZhaWxf\ndW5kZXIgPSA4MApzaG93X21pc3NpbmcgPSB0cnVlCnNraXBfY292ZXJlZCA9\nIHRydWUKZXhjbHVkZV9hbHNvID0gWyJpZiBfX25hbWVfXyA9PSAuX19tYWlu\nX18uOiIsICJpZiBUWVBFX0NIRUNLSU5HOiJdCg==\n\n"
+  },
+  "api repos/metalayerlab/sluice/contents/pyproject.toml --jq .content": {
+   "exit": 0,
+   "stdout": "W3Byb2plY3RdCm5hbWUgPSAic2x1aWNlIgojIE93bmVkIGJ5IHJlbGVhc2Ut\ncGxlYXNlOiBuZXZlciBlZGl0IGJ5IGhhbmQgKHNlZSB0aGUgd2lraSdzIFJl\nbGVhc2UtUHJvY2VzcyBwYWdlKS4KdmVyc2lvbiA9ICIwLjIuNSIKZGVzY3Jp\ncHRpb24gPSAiU2x1aWNlIOKAlCBhIFB5dGhvbiBGVVNFIGZpbGVzeXN0ZW0g\nd2l0aCBhbiBFeHByZXNzLXN0eWxlIHJvdXRlciB0aGF0IGdhdGVzLCByZXdy\naXRlcywgYW5kIG1pZGRsZXdhcmUtaW50ZXJjZXB0cyBldmVyeSBmaWxlc3lz\ndGVtIGNhbGwgYmV0d2VlbiB2aXJ0dWFsIHBhdGhzIGFuZCB0aGVpciBiYWNr\naW5nIHN0b3Jlcy4iCnJlYWRtZSA9ICJSRUFETUUubWQiCnJlcXVpcmVzLXB5\ndGhvbiA9ICI+PTMuMTMiCmxpY2Vuc2UgPSAiVW5saWNlbnNlIgpkZXBlbmRl\nbmNpZXMgPSBbCiAgICAiaW50ZXJwb3NlIEAgZ2l0K2h0dHBzOi8vZ2l0aHVi\nLmNvbS9tZXRhbGF5ZXJsYWIvaW50ZXJwb3NlQHYwLjMuMCIsCiAgICAicHl5\nYW1sPj02LjAiLAogICAgInR5cGVyPj0wLjE1IiwKXQoKW3Byb2plY3Quc2Ny\naXB0c10Kc2x1aWNlID0gInNsdWljZS5jbGk6bWFpbiIKCltwcm9qZWN0LnVy\nbHNdCkhvbWVwYWdlID0gImh0dHBzOi8vZ2l0aHViLmNvbS9tZXRhbGF5ZXJs\nYWIvc2x1aWNlIgpEb2N1bWVudGF0aW9uID0gImh0dHBzOi8vZ2l0aHViLmNv\nbS9tZXRhbGF5ZXJsYWIvc2x1aWNlL3dpa2kiCkNoYW5nZWxvZyA9ICJodHRw\nczovL2dpdGh1Yi5jb20vbWV0YWxheWVybGFiL3NsdWljZS9ibG9iL21haW4v\nQ0hBTkdFTE9HLm1kIgoKW3Byb2plY3Qub3B0aW9uYWwtZGVwZW5kZW5jaWVz\nXQpmdXNlID0gWwogICAgInB5ZnVzZTM+PTMuNS4wIiwKXQoKW2RlcGVuZGVu\nY3ktZ3JvdXBzXQpkZXYgPSBbCiAgICAibXlweT49MS4xNSIsCiAgICAicHl0\nZXN0Pj04LjMiLAogICAgInB5dGVzdC1jb3Y+PTYuMCIsCiAgICAicnVmZj49\nMC4xMSIsCiAgICAidHlwZXMtcHl5YW1sIiwKXQoKW2J1aWxkLXN5c3RlbV0K\ncmVxdWlyZXMgPSBbImhhdGNobGluZyJdCmJ1aWxkLWJhY2tlbmQgPSAiaGF0\nY2hsaW5nLmJ1aWxkIgoKW3Rvb2wuaGF0Y2guYnVpbGQudGFyZ2V0cy53aGVl\nbF0KcGFja2FnZXMgPSBbInNyYy9zbHVpY2UiXQoKW3Rvb2wuaGF0Y2gubWV0\nYWRhdGFdCiMgaW50ZXJwb3NlIGlzIHBpbm5lZCBieSBpdHMgZ2l0IFVSTCwg\nbm90IFB5UEkgKHRlbXBsYXRlLXB5dGhvbiBkZWNpc2lvbiAwMDAzKQphbGxv\ndy1kaXJlY3QtcmVmZXJlbmNlcyA9IHRydWUKClt0b29sLnJ1ZmZdCmxpbmUt\nbGVuZ3RoID0gMTAwCnRhcmdldC12ZXJzaW9uID0gInB5MzEzIgoKW3Rvb2wu\ncnVmZi5saW50XQpzZWxlY3QgPSBbIkUiLCAiRiIsICJXIiwgIkkiLCAiQiIs\nICJVUCIsICJTSU0iLCAiUlVGIiwgIlMiLCAiVDIwIl0KClt0b29sLnJ1ZmYu\nbGludC5wZXItZmlsZS1pZ25vcmVzXQojIGFzc2VydCBpcyBob3cgcHl0ZXN0\nIGNoZWNrczsgc2NyaXB0cyBwcmludCwgYW5kIHJ1biBnaXQsIGJ5IGRlc2ln\nbi4KInRlc3RzLyoiID0gWyJTMTAxIl0KInNjcmlwdHMvKiIgPSBbIlQyMCIs\nICJTNjAzIiwgIlM2MDciXQojIGJlbmNobWFya3MgcHJpbnQgdGhlaXIgcmVz\ndWx0cyBhbmQgc3RhcnQgdGhlIG1vdW50IGRhZW1vbi4KImJlbmNobWFya3Mv\nKiIgPSBbIlQyMCIsICJTNjAzIl0KClt0b29sLm15cHldCnN0cmljdCA9IHRy\ndWUKZmlsZXMgPSBbInNyYy9zbHVpY2UiLCAidGVzdHMiLCAic2NyaXB0cyIs\nICJiZW5jaG1hcmtzIiwgImV4YW1wbGVzIl0KIyBUaGUgZXhhbXBsZXMgYXJl\nIGNvcGllZCBiZXNpZGUgYW4gYXBwIGFuZCBpbXBvcnRlZCB0b3AtbGV2ZWwg\nKGBmcm9tIGF1dGggaW1wb3J0IGF1dGhgKS4KbXlweV9wYXRoID0gImV4YW1w\nbGVzIgoKW1t0b29sLm15cHkub3ZlcnJpZGVzXV0KIyBweWZ1c2UzIGlzIHRo\nZSBvcHRpb25hbCBgZnVzZWAgZXh0cmEgKGRlc2lnbiAwMDAxLCBxdWVzdGlv\nbiAxMCk6IENJIGluc3RhbGxzIHdpdGhvdXQgaXQsIGFuZAojIG9ubHkgZnMu\ncHkgYW5kIG1vdW50LnB5IGltcG9ydCBpdC4gV2hlcmUgaXQgaXMgaW5zdGFs\nbGVkLCBpdHMgb3duIHR5cGVzIGFyZSBjaGVja2VkLgptb2R1bGUgPSBbInB5\nZnVzZTMiLCAicHlmdXNlMy4qIl0KaWdub3JlX21pc3NpbmdfaW1wb3J0cyA9\nIHRydWUKClt0b29sLnB5dGVzdC5pbmlfb3B0aW9uc10KYWRkb3B0cyA9ICIt\ncSAtLXN0cmljdC1tYXJrZXJzIC0tc3RyaWN0LWNvbmZpZyAtLWNvdiAtLWNv\ndi1yZXBvcnQ9dGVybS1taXNzaW5nOnNraXAtY292ZXJlZCIKdGVzdHBhdGhz\nID0gWyJ0ZXN0cyJdCm1hcmtlcnMgPSBbImludGVncmF0aW9uOiB0YWxrcyB0\nbyByZWFsIGV4dGVybmFsIHN5c3RlbXM7IGRlc2VsZWN0IHdpdGggLW0gJ25v\ndCBpbnRlZ3JhdGlvbiciXQojIEEgZGVwcmVjYXRpb24gZmFpbHMgdGhlIGRl\ncGVuZGVuY3kgYnVtcCB0aGF0IGJyaW5ncyBpdCwgbm90IGEgbGF0ZXIgcnVu\nLgpmaWx0ZXJ3YXJuaW5ncyA9IFsiZXJyb3IiXQoKW3Rvb2wuY292ZXJhZ2Uu\ncnVuXQpzb3VyY2UgPSBbInNsdWljZSJdCm9taXQgPSBbIiovX19tYWluX18u\ncHkiXQpicmFuY2ggPSB0cnVlCgpbdG9vbC5jb3ZlcmFnZS5yZXBvcnRdCmZh\naWxfdW5kZXIgPSA4MApzaG93X21pc3NpbmcgPSB0cnVlCnNraXBfY292ZXJl\nZCA9IHRydWUKZXhjbHVkZV9hbHNvID0gWyJpZiBfX25hbWVfXyA9PSAuX19t\nYWluX18uOiIsICJpZiBUWVBFX0NIRUNLSU5HOiJdCg==\n\n"
+  },
+  "issue list -R metalayerlab/interpose --state open --limit 1000 --json number": {
+   "exit": 0,
+   "stdout": "[{\"number\":50},{\"number\":49},{\"number\":48}]\n"
+  },
+  "issue list -R metalayerlab/mitm-proxy --state open --limit 1000 --json number": {
+   "exit": 0,
+   "stdout": "[]\n"
+  },
+  "issue list -R metalayerlab/sluice --state open --limit 1000 --json number": {
+   "exit": 0,
+   "stdout": "[]\n"
+  },
+  "pr list -R metalayerlab/interpose --state open --limit 200 --json number,title,author,createdAt,isDraft,url": {
+   "exit": 0,
+   "stdout": "[]\n"
+  },
+  "pr list -R metalayerlab/mitm-proxy --state open --limit 200 --json number,title,author,createdAt,isDraft,url": {
+   "exit": 0,
+   "stdout": "[]\n"
+  },
+  "pr list -R metalayerlab/sluice --state open --limit 200 --json number,title,author,createdAt,isDraft,url": {
+   "exit": 0,
+   "stdout": "[{\"author\":{\"is_bot\":true,\"login\":\"app/metalayerlab-stardate\"},\"createdAt\":\"2026-11-04T02:12:36Z\",\"isDraft\":false,\"number\":76,\"title\":\"chore(main): release 0.2.6\",\"url\":\"https://github.com/metalayerlab/sluice/pull/76\"}]\n"
+  },
+  "release list -R metalayerlab/interpose --limit 100 --json tagName,publishedAt,isLatest,isPrerelease,isDraft": {
+   "exit": 0,
+   "stdout": "[{\"isDraft\":false,\"isLatest\":true,\"isPrerelease\":false,\"publishedAt\":\"2026-11-04T03:46:55Z\",\"tagName\":\"v0.4.1\"},{\"isDraft\":false,\"isLatest\":false,\"isPrerelease\":false,\"publishedAt\":\"2026-11-04T03:26:34Z\",\"tagName\":\"v0.4.0\"},{\"isDraft\":false,\"isLatest\":false,\"isPrerelease\":false,\"publishedAt\":\"2026-11-04T02:54:08Z\",\"tagName\":\"v0.3.3\"},{\"isDraft\":false,\"isLatest\":false,\"isPrerelease\":false,\"publishedAt\":\"2026-11-04T02:42:06Z\",\"tagName\":\"v0.3.2\"},{\"isDraft\":false,\"isLatest\":false,\"isPrerelease\":false,\"publishedAt\":\"2026-11-04T02:31:22Z\",\"tagName\":\"v0.3.1\"},{\"isDraft\":false,\"isLatest\":false,\"isPrerelease\":false,\"publishedAt\":\"2026-11-04T02:21:33Z\",\"tagName\":\"v0.3.0\"},{\"isDraft\":false,\"isLatest\":false,\"isPrerelease\":false,\"publishedAt\":\"2026-11-02T18:46:12Z\",\"tagName\":\"v0.2.2\"},{\"isDraft\":false,\"isLatest\":false,\"isPrerelease\":false,\"publishedAt\":\"2026-11-02T18:34:58Z\",\"tagName\":\"v0.2.1\"},{\"isDraft\":false,\"isLatest\":false,\"isPrerelease\":false,\"publishedAt\":\"2026-11-02T15:24:22Z\",\"tagName\":\"v0.2.0\"},{\"isDraft\":false,\"isLatest\":false,\"isPrerelease\":false,\"publishedAt\":\"2026-11-02T15:18:47Z\",\"tagName\":\"v0.1.5\"},{\"isDraft\":false,\"isLatest\":false,\"isPrerelease\":false,\"publishedAt\":\"2026-11-02T15:12:06Z\",\"tagName\":\"v0.1.4\"},{\"isDraft\":false,\"isLatest\":false,\"isPrerelease\":false,\"publishedAt\":\"2026-11-02T15:05:30Z\",\"tagName\":\"v0.1.3\"},{\"isDraft\":false,\"isLatest\":false,\"isPrerelease\":false,\"publishedAt\":\"2026-11-02T04:30:18Z\",\"tagName\":\"v0.1.2\"},{\"isDraft\":false,\"isLatest\":false,\"isPrerelease\":false,\"publishedAt\":\"2026-11-02T04:17:29Z\",\"tagName\":\"v0.1.1\"},{\"isDraft\":false,\"isLatest\":false,\"isPrerelease\":false,\"publishedAt\":\"2026-11-02T03:42:03Z\",\"tagName\":\"v0.1.0\"}]\n"
+  },
+  "release list -R metalayerlab/mitm-proxy --limit 100 --json tagName,publishedAt,isLatest,isPrerelease,isDraft": {
+   "exit": 0,
+   "stdout": "[{\"isDraft\":false,\"isLatest\":true,\"isPrerelease\":false,\"publishedAt\":\"2026-11-04T04:04:00Z\",\"tagName\":\"v0.3.2\"},{\"isDraft\":false,\"isLatest\":false,\"isPrerelease\":false,\"publishedAt\":\"2026-11-04T01:43:54Z\",\"tagName\":\"v0.3.1\"},{\"isDraft\":false,\"isLatest\":false,\"isPrerelease\":false,\"publishedAt\":\"2026-11-02T15:33:45Z\",\"tagName\":\"v0.3.0\"},{\"isDraft\":false,\"isLatest\":false,\"isPrerelease\":false,\"publishedAt\":\"2026-11-02T04:56:58Z\",\"tagName\":\"v0.2.1\"},{\"isDraft\":false,\"isLatest\":false,\"isPrerelease\":false,\"publishedAt\":\"2026-11-02T04:08:52Z\",\"tagName\":\"v0.2.0\"},{\"isDraft\":false,\"isLatest\":false,\"isPrerelease\":false,\"publishedAt\":\"2026-11-01T01:34:03Z\",\"tagName\":\"v0.1.1\"},{\"isDraft\":false,\"isLatest\":false,\"isPrerelease\":false,\"publishedAt\":\"2026-10-28T20:15:24Z\",\"tagName\":\"v0.1.0\"}]\n"
+  },
+  "release list -R metalayerlab/sluice --limit 100 --json tagName,publishedAt,isLatest,isPrerelease,isDraft": {
+   "exit": 0,
+   "stdout": "[{\"isDraft\":false,\"isLatest\":true,\"isPrerelease\":false,\"publishedAt\":\"2026-11-02T19:07:33Z\",\"tagName\":\"v0.2.5\"},{\"isDraft\":false,\"isLatest\":false,\"isPrerelease\":false,\"publishedAt\":\"2026-11-02T16:34:05Z\",\"tagName\":\"v0.2.4\"},{\"isDraft\":false,\"isLatest\":false,\"isPrerelease\":false,\"publishedAt\":\"2026-11-02T16:09:26Z\",\"tagName\":\"v0.2.3\"},{\"isDraft\":false,\"isLatest\":false,\"isPrerelease\":false,\"publishedAt\":\"2026-11-02T05:14:00Z\",\"tagName\":\"v0.2.2\"},{\"isDraft\":false,\"isLatest\":false,\"isPrerelease\":false,\"publishedAt\":\"2026-11-02T04:56:29Z\",\"tagName\":\"v0.2.1\"},{\"isDraft\":false,\"isLatest\":false,\"isPrerelease\":false,\"publishedAt\":\"2026-11-02T04:20:18Z\",\"tagName\":\"v0.2.0\"},{\"isDraft\":false,\"isLatest\":false,\"isPrerelease\":false,\"publishedAt\":\"2026-11-01T01:09:48Z\",\"tagName\":\"v0.1.2\"},{\"isDraft\":false,\"isLatest\":false,\"isPrerelease\":false,\"publishedAt\":\"2026-10-31T02:02:33Z\",\"tagName\":\"v0.1.1\"},{\"isDraft\":false,\"isLatest\":false,\"isPrerelease\":false,\"publishedAt\":\"2026-10-31T01:42:00Z\",\"tagName\":\"v0.1.0\"}]\n"
+  },
+  "release view -R metalayerlab/interpose --json tagName,publishedAt": {
+   "exit": 0,
+   "stdout": "{\"publishedAt\":\"2026-11-04T03:46:55Z\",\"tagName\":\"v0.4.1\"}\n"
+  },
+  "release view -R metalayerlab/mitm-proxy --json tagName,publishedAt": {
+   "exit": 0,
+   "stdout": "{\"publishedAt\":\"2026-11-04T04:04:00Z\",\"tagName\":\"v0.3.2\"}\n"
+  },
+  "release view -R metalayerlab/sluice --json tagName,publishedAt": {
+   "exit": 0,
+   "stdout": "{\"publishedAt\":\"2026-11-02T19:07:33Z\",\"tagName\":\"v0.2.5\"}\n"
+  },
+  "run list -R metalayerlab/interpose --branch main --workflow base-ci.yml --status completed --limit 1 --json conclusion,createdAt,displayTitle,headSha,url": {
+   "exit": 0,
+   "stdout": "[{\"conclusion\":\"success\",\"createdAt\":\"2026-11-04T03:46:47Z\",\"displayTitle\":\"chore(main): release 0.4.1 (#52)\",\"headSha\":\"21a13bd991b8d1364698b323ababd957b9587961\",\"url\":\"https://github.com/metalayerlab/interpose/actions/runs/41769198769\"}]\n"
+  },
+  "run list -R metalayerlab/mitm-proxy --branch main --workflow base-ci.yml --status completed --limit 1 --json conclusion,createdAt,displayTitle,headSha,url": {
+   "exit": 0,
+   "stdout": "[{\"conclusion\":\"success\",\"createdAt\":\"2026-11-04T04:03:51Z\",\"displayTitle\":\"chore(main): release 0.3.2 (#31)\",\"headSha\":\"d8b6119af7fe2f30441f2378898c97e7ea4cf865\",\"url\":\"https://github.com/metalayerlab/mitm-proxy/actions/runs/41770889748\"}]\n"
+  },
+  "run list -R metalayerlab/sluice --branch main --workflow base-ci.yml --status completed --limit 1 --json conclusion,createdAt,displayTitle,headSha,url": {
+   "exit": 0,
+   "stdout": "[{\"conclusion\":\"success\",\"createdAt\":\"2026-11-04T02:27:50Z\",\"displayTitle\":\"chore(deps): bump interpose from v0.2.2 to v0.3.0 (#77)\",\"headSha\":\"62aca3bc77e36f6a32b6751fb3a8968cdbb54f50\",\"url\":\"https://github.com/metalayerlab/sluice/actions/runs/41760906965\"}]\n"
+  }
+ },
+ "note": "gh output recorded from the live repos by running meta/network-tools through a recording gh; keyed by gh's argv joined with spaces",
+ "recorded_at": "2026-11-04T04:11:12+00:00"
+}
