@@ -22,6 +22,7 @@ To move to a newer release, change the tag in `pyproject.toml` and run `uv lock`
 A project's `config.py` declares its settings and turns the resolved values into its own `Config`:
 
 ```python
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,6 +44,7 @@ SETTINGS = Settings(
     default_path=Path("/etc/myapp/config.yaml"),
 )
 CONFIG_ENV = SETTINGS.config_env  # "MYAPP_CONFIG"
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -56,6 +58,8 @@ class Config:
 
 def load_config(path: Path | None = None, environ: Mapping[str, str] | None = None) -> Config:
     r = SETTINGS.resolve(path, environ)
+    for warning in r.warnings:  # unknown keys and variables: names only, never values
+        log.warning("%s", warning)
     # Rules that span settings go here, raising ConfigError.
     # Each accessor checks the setting's kind: r.str() on a secret setting is a TypeError.
     return Config(
@@ -84,7 +88,7 @@ Config(log_level='INFO', port=9090, token=Secret('********'), hosts=('example.or
                 'upstream.token': 'MYAPP_UPSTREAM_TOKEN_FILE', 'allow.hosts': 'file'})
 ```
 
-`config.token.reveal()` gives the token at the point of use. A bad value stops it with one line, such as `listen.port: expected int, got 0.5 (from /etc/myapp/config.yaml)`.
+`config.token.reveal()` gives the token at the point of use. A misspelt key, such as `prot:` under `listen:`, is ignored and logs `unknown key 'listen.prot' in /etc/myapp/config.yaml: did you mean 'listen.port'?`. A bad value stops it with one line, such as `listen.port: expected int, got 0.5 (from /etc/myapp/config.yaml)`.
 
 For secrets that aren't settings (a middleware's API keys, say), `read_secret_dir(Path("/run/secrets"))` reads each file in a directory as a `Secret`.
 

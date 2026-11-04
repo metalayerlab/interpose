@@ -24,3 +24,4 @@ the team (and its AI assistants) should know at a glance.
 - Mapping hook failures to a deny inside interpose: a 502 or an errno is transport; `HookFailed` carries what a mapper needs (design 0003).
 - Retrying a failed hook, or killing the unit: undefined after side effects (mitm-proxy 0001); `"fail"` is a deny answer (design 0003).
 - Built-in middleware (a `Snapshot`/TTL cache, ...) or preset policies: mechanism only, as sluice's 0002 rules (design 0003).
+- Unknown keys as errors (or a strict switch in interpose): breaks rollbacks and shared config files; they warn on `Resolved.warnings`, and a project that wants errors raises on them (design 0009).

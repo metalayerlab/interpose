@@ -22,7 +22,7 @@ flowchart LR
 |---|---|
 | `interpose/__init__.py` | Package version and description |
 | `interpose/pipeline.py` | `Policy`, `Entry`, `Pipeline`, `Run`, `Failure`, `HookFailed`: the middleware loop and the guard around every hook |
-| `interpose/settings.py` | `Setting`, `Settings`, `Layer`, `Resolved`, `ConfigError`, coercion, the single-value checks |
+| `interpose/settings.py` | `Setting`, `Settings`, `Layer`, `Resolved`, `ConfigError`, `ConfigWarning`, coercion, the single-value checks |
 | `interpose/secret.py` | `Secret`, `MASK`, `read_secret_dir` |
 | `interpose/metrics.py` | `Label`, `Counter`, `Gauge`, `Histogram`, `Registry`, `CONTENT_TYPE`: Prometheus text exposition |
 
@@ -79,8 +79,9 @@ With a limit, `asyncio.timeout` (a timer scheduled and cancelled per call) is mo
    Strings from the environment and `_FILE` go through the same rules, so `"0.5"` fails `int` everywhere. pyyaml types YAML 1.1 values first: `yes` is already `True`, `1_000` is already `1000`.
 4. **`check`**, on every value, the default included. Its `ValueError` becomes `ConfigError("<key>: <reason>")`, then `(from <where>)` for a value from a layer, with a secret value masked out of the reason. A value it returns replaces the coerced one if it is the setting's kind, else a `ConfigError`; a secret setting's value is never replaced ([0007](https://github.com/metalayerlab/interpose/blob/main/docs/design/0007-check-replacements-and-typed-accessors.md)).
 5. **`secret=True`** wraps the value in `Secret`, after the check.
+6. **Unknown keys and variables** ([0009](https://github.com/metalayerlab/interpose/blob/main/docs/design/0009-settings-extensions.md)), once every setting has resolved. Each layer's tree is walked in document order: a dotted path is known if it is a setting's key or a parent of one, and nothing below a setting's key, or below a scalar, is looked at. Each unknown path gives one `ConfigWarning`, at its first unknown level; a non-string key (`on:` loads as `True`) is never known and is named by its YAML text, and neither is a key with a dot in it (`listen.port:` at the top level), which resolution never reads. Then each environment variable that starts with the prefix, by name, unless a setting reads it (its variable or `_FILE`), it is `<PREFIX>CONFIG` or it is in `extra_env`; with an empty prefix no variable is checked. Only names are read, never values. The suggestion is `difflib.get_close_matches` with cutoff 0.75 over current names: for a key, the keys and parents at the same depth (so `listne` suggests `listen`, and `listen.1` never its own parent); for a variable, the variables settings read. The known names are sets built once in `Settings`, which aliases, sections and typed list items extend in later steps.
 
-Nothing is cached, and nothing is logged. The first error stops the resolve.
+Nothing is cached, and nothing is logged. The first error stops the resolve; warnings never do.
 
 ### Metrics
 
