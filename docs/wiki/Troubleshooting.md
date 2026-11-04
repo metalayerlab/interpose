@@ -96,7 +96,15 @@ A section from a remote layer, such as a control plane's managed configuration, 
 
 ### "middleware.config.auth: cannot read secret_file /run/secrets/x: No such file or directory"
 
-A secret leaf names a file that is missing or unreadable by the process's user. A relative path is relative to the working directory. The message never shows the file's contents.
+A secret leaf names a file that is missing or unreadable by the process's user. A relative path resolves against the directory of the file that holds the leaf (the config file, or the section's `_FILE`), never the working directory, and the message gives where it looked: `cannot read secret_file secrets/token (/etc/myapp/secrets/token): ...`. That directory is the one named, not a symlink's target. Since 0.5.0; before it, a relative path was read from the working directory. The message never shows the file's contents.
+
+### "middleware.config.auth: secret_file must be absolute here: this configuration has no file to resolve secrets/token against"
+
+A relative secret leaf in a `Layer` the project built itself with `secret_files=True` and no `base_dir`, so there is no file to resolve it against. Write the absolute path, or, if the project read the layer from a file, have it pass `base_dir=` that file's directory. The file was not opened.
+
+### "middleware.config.auth: secret_file ~/token: '~' is not expanded; write the absolute path"
+
+A secret leaf's path starts with `~` (`~/token`, `~app/token`). interpose never expands it: a service user's home is rarely what is meant, and before 0.5.0 it silently meant a directory named `~` under the working directory. Write the absolute path, or a path relative to the config file.
 
 ### "middleware.config.a[0]: refers back to middleware.config.a, which holds it, so it never ends: ..."
 

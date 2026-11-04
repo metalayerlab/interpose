@@ -372,7 +372,11 @@ class TestLayers:
         environ = {"APP_CONFIG": str(config), "APP_A": "x"}
         file_layer = settings.read_file(environ=environ)
         assert file_layer == Layer(
-            {"listen": {"port": 1}}, source="file", where=str(config), secret_files=True
+            {"listen": {"port": 1}},
+            source="file",
+            where=str(config),
+            secret_files=True,
+            base_dir=tmp_path,
         )
         assert settings.resolve(environ=environ, layers=[file_layer]) == settings.resolve(
             environ=environ
@@ -382,7 +386,7 @@ class TestLayers:
     def test_read_file_of_a_missing_file_is_an_empty_layer(self, tmp_path: Path) -> None:
         missing = tmp_path / "missing.yaml"
         assert make(PORT).read_file(missing, {}) == Layer(
-            {}, source="file", where=str(missing), secret_files=True
+            {}, source="file", where=str(missing), secret_files=True, base_dir=tmp_path
         )
         assert make(PORT).read_file(environ={}).where == str(DEFAULT)
 
@@ -2851,7 +2855,11 @@ class TestSecretLeaves:
             r = resolve_expanding(tmp_path, text, MW, environ=environ)
             assert r.section("middleware.config")["t"] == Secret(VALUE)
         else:
-            with pytest.raises(ConfigError, match=r"cannot read secret_file \$\{DIR\}/token: No"):
+            # Unexpanded, `${DIR}/token` is a relative path, under the config file's directory.
+            unread = re.escape(
+                f"cannot read secret_file ${{DIR}}/token ({tmp_path}/${{DIR}}/token)"
+            )
+            with pytest.raises(ConfigError, match=unread + ": No"):
                 resolve_yaml(tmp_path, text, MW, environ=environ)
 
 
@@ -2948,6 +2956,269 @@ class TestSecretLeavesFromRemoteLayers:
         r = settings.resolve(environ={}, layers=[control({}), settings.read_file(config, {})])
         assert r.section("middleware.config") == Section({"t": Secret(VALUE)})
         assert str(token) in opened
+
+
+def config_beside(directory: Path, text: str) -> Path:
+    """A config file in `directory` (made if missing) holding `text`."""
+    directory.mkdir(parents=True, exist_ok=True)
+    config = directory / "config.yaml"
+    config.write_text(text, encoding="utf-8")
+    return config
+
+
+LEAF = "middleware: {config: {t: {secret_file: %s}}}\n"
+
+
+class TestRelativeSecretFiles:
+    """Design 0010: a relative secret_file path resolves against the directory of the file that
+    holds it, never the working directory; with no file, it is refused unopened."""
+
+    opened = TestSecretLeavesFromRemoteLayers.opened
+
+    @pytest.fixture
+    def elsewhere(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """A working directory with a decoy `token` and `secrets/token`, so a path read from the
+        working directory gives the wrong value instead of an error."""
+        cwd = tmp_path / "cwd"
+        (cwd / "secrets").mkdir(parents=True)
+        secret_file(cwd, "decoy\n")
+        secret_file(cwd / "secrets", "decoy\n")
+        monkeypatch.chdir(cwd)
+        return cwd
+
+    def test_beside_the_config_file_from_another_working_directory(
+        self, tmp_path: Path, elsewhere: Path
+    ) -> None:
+        etc = tmp_path / "etc"
+        config = config_beside(etc, LEAF % "secrets/token")
+        (etc / "secrets").mkdir()
+        secret_file(etc / "secrets")
+        r = make(MW).resolve(config, {})
+        assert r.section("middleware.config") == Section({"t": Secret(VALUE)})
+
+    def test_read_file_sets_base_dir_to_the_files_directory(self, tmp_path: Path) -> None:
+        config = config_beside(tmp_path / "etc", "{}\n")
+        assert make(MW).read_file(config, {}).base_dir == tmp_path / "etc"
+        assert Layer({}, source="s", where="w").base_dir is None
+
+    def test_a_sections_file_variable_uses_its_own_directory(
+        self, tmp_path: Path, elsewhere: Path
+    ) -> None:
+        # The config file sets another section, and has a decoy token beside it.
+        etc = tmp_path / "etc"
+        config = config_beside(etc, "other: {a: 1}\n")
+        secret_file(etc, "decoy\n")
+        mounted = tmp_path / "mounted"
+        mounted.mkdir()
+        secret_file(mounted)
+        (mounted / "mw.yaml").write_text("t: {secret_file: token}\n", encoding="utf-8")
+        other = Setting("other", "", "", is_section=True)
+        environ = {"APP_MIDDLEWARE_CONFIG_FILE": str(mounted / "mw.yaml")}
+        r = make(MW, other).resolve(config, environ)
+        assert r.section("middleware.config") == Section({"t": Secret(VALUE)})
+
+    def test_a_relative_sections_file_variable_resolves_from_the_working_directory(
+        self, tmp_path: Path, elsewhere: Path
+    ) -> None:
+        # The `_FILE` path itself is found from the working directory, as any path is; its
+        # leaves then resolve against the file's directory.
+        mounted = elsewhere / "mounted"
+        mounted.mkdir()
+        secret_file(mounted)
+        (mounted / "mw.yaml").write_text("t: {secret_file: token}\n", encoding="utf-8")
+        r = make(MW).resolve(DEFAULT, {"APP_MIDDLEWARE_CONFIG_FILE": "mounted/mw.yaml"})
+        assert r.section("middleware.config") == Section({"t": Secret(VALUE)})
+
+    def test_a_list_sections_item(self, tmp_path: Path, elsewhere: Path) -> None:
+        etc = tmp_path / "etc"
+        config = config_beside(etc, "reverse: [{listen: ':80', auth: {secret_file: token}}]\n")
+        secret_file(etc)
+        items = make(REVERSE).resolve(config, {}).sections("reverse")
+        assert items == (Section({"listen": ":80", "auth": Secret(VALUE)}),)
+
+    def test_a_typed_items_secret_field_from_a_layer_and_a_file_variable(
+        self, tmp_path: Path, elsewhere: Path
+    ) -> None:
+        etc = tmp_path / "etc"
+        config = config_beside(etc, "route: [{listen: x, token: {secret_file: token}}]\n")
+        secret_file(etc)
+        assert make(ROUTE).resolve(config, {}).sections("route")[0]["token"] == Secret(VALUE)
+        mounted = tmp_path / "mounted"
+        mounted.mkdir()
+        secret_file(mounted, "mounted\n")
+        (mounted / "route.yaml").write_text(
+            "[{listen: x, token: {secret_file: token}}]\n", encoding="utf-8"
+        )
+        environ = {"APP_ROUTE_FILE": str(mounted / "route.yaml")}
+        r = make(ROUTE).resolve(config, environ)
+        assert r.sections("route")[0]["token"] == Secret("mounted")
+
+    def test_an_indexed_section_fields_file_uses_its_own_directory(
+        self, tmp_path: Path, elsewhere: Path
+    ) -> None:
+        mounted = tmp_path / "mounted"
+        mounted.mkdir()
+        secret_file(mounted)
+        (mounted / "opts.yaml").write_text("t: {secret_file: token}\n", encoding="utf-8")
+        environ = {"APP_ROUTE_0_LISTEN": "x", "APP_ROUTE_0_OPTS_FILE": str(mounted / "opts.yaml")}
+        r = make(ROUTE).resolve(DEFAULT, environ)
+        assert r.sections("route")[0]["opts"] == Section({"t": Secret(VALUE)})
+
+    def test_a_project_layer_with_base_dir(self, tmp_path: Path, elsewhere: Path) -> None:
+        secret_file(tmp_path)
+        data = {"middleware": {"config": {"t": {"secret_file": "token"}}}}
+        r = make(MW).resolve(environ={}, layers=[layer(data, secret_files=True, base_dir=tmp_path)])
+        assert r.section("middleware.config") == Section({"t": Secret(VALUE)})
+
+    @pytest.mark.parametrize(
+        ("data", "path"),
+        [
+            ({"middleware": {"config": {"t": {"secret_file": "token"}}}}, "middleware.config.t"),
+            ({"route": [{"listen": "x", "token": {"secret_file": "token"}}]}, "route[0].token"),
+        ],
+    )
+    def test_a_project_layer_without_base_dir_refuses_it_unopened(
+        self, elsewhere: Path, opened: list[str], data: dict[str, Any], path: str
+    ) -> None:
+        with pytest.raises(ConfigError) as info:
+            make(MW, ROUTE).resolve(environ={}, layers=[layer(data, secret_files=True)])
+        assert str(info.value) == (
+            f"{path}: secret_file must be absolute here: this configuration has no file to "
+            f"resolve token against (from {ETC})"
+        )
+        assert not [p for p in opened if p.endswith("token")]
+
+    @pytest.mark.parametrize("written", ["~/token", "~app/token", "~"])
+    def test_tilde_is_refused_unopened(
+        self, tmp_path: Path, opened: list[str], written: str
+    ) -> None:
+        # Quoted: a bare `~` is YAML's null.
+        config = config_beside(tmp_path / "etc", LEAF % f"'{written}'")
+        (tmp_path / "etc" / "~").mkdir()
+        secret_file(tmp_path / "etc" / "~")
+        opened.clear()
+        with pytest.raises(ConfigError) as info:
+            make(MW).resolve(config, {})
+        assert str(info.value) == (
+            f"middleware.config.t: secret_file {written}: '~' is not expanded; write the absolute "
+            f"path (from {config})"
+        )
+        assert not [p for p in opened if p.endswith("token")]
+
+    def test_tilde_inside_a_path_is_an_ordinary_part(self, tmp_path: Path) -> None:
+        etc = tmp_path / "etc"
+        config = config_beside(etc, LEAF % "a/~/token")
+        (etc / "a" / "~").mkdir(parents=True)
+        secret_file(etc / "a" / "~")
+        assert make(MW).resolve(config, {}).section("middleware.config")["t"] == Secret(VALUE)
+
+    def test_a_symlinked_config_directory_keeps_the_links_directory(
+        self, tmp_path: Path, elsewhere: Path
+    ) -> None:
+        # A Kubernetes ConfigMap mount: each file links through `..data` into a timestamped
+        # directory the kubelet replaces on update. The base is the mount, never the target.
+        mount = tmp_path / "etc"
+        stamped = mount / "..2026_11_04_00_00_00.000000000"
+        config_beside(stamped, LEAF % "token")
+        secret_file(stamped)
+        (mount / "..data").symlink_to(stamped.name)
+        (mount / "config.yaml").symlink_to("..data/config.yaml")
+        (mount / "token").symlink_to("..data/token")
+        file_layer = make(MW).read_file(mount / "config.yaml", {})
+        assert (file_layer.base_dir, file_layer.where) == (mount, str(mount / "config.yaml"))
+        r = make(MW).resolve(mount / "config.yaml", {})
+        assert r.section("middleware.config") == Section({"t": Secret(VALUE)})
+
+    def test_a_config_file_linked_from_elsewhere_resolves_beside_the_link(
+        self, tmp_path: Path, elsewhere: Path
+    ) -> None:
+        store = tmp_path / "store"
+        config_beside(store, LEAF % "token")
+        secret_file(store, "beside the target\n")
+        etc = tmp_path / "etc"
+        etc.mkdir()
+        (etc / "config.yaml").symlink_to(store / "config.yaml")
+        secret_file(etc)
+        r = make(MW).resolve(etc / "config.yaml", {})
+        assert r.section("middleware.config") == Section({"t": Secret(VALUE)})
+
+    def test_a_relative_config_path_is_made_absolute_once(
+        self, tmp_path: Path, elsewhere: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        etc = tmp_path / "etc"
+        config_beside(etc, LEAF % "token")
+        secret_file(etc)
+        monkeypatch.chdir(etc)
+        settings = make(MW)
+        file_layer = settings.read_file(environ={"APP_CONFIG": "config.yaml"})
+        assert (file_layer.where, file_layer.base_dir) == (str(etc / "config.yaml"), etc)
+        # A later chdir (a daemon's `chdir("/")`) doesn't move the base of a reload.
+        monkeypatch.chdir(elsewhere)
+        r = settings.resolve(environ={}, layers=[file_layer])
+        assert r.section("middleware.config") == Section({"t": Secret(VALUE)})
+        # A relative `path` argument is made absolute in the same way.
+        monkeypatch.chdir(tmp_path)
+        assert settings.read_file(Path("etc/config.yaml"), {}).base_dir == etc
+
+    @pytest.mark.parametrize("sub", ["secrets", "ABSOLUTE"])
+    def test_expansion_comes_first(self, tmp_path: Path, elsewhere: Path, sub: str) -> None:
+        etc = tmp_path / "etc"
+        (etc / "secrets").mkdir(parents=True)
+        secret_file(etc / "secrets")
+        environ = {"SUB": str(etc / "secrets") if sub == "ABSOLUTE" else sub}
+        r = resolve_expanding(etc, LEAF % "'${SUB}/token'", MW, environ=environ)
+        assert r.section("middleware.config")["t"] == Secret(VALUE)
+
+    def test_a_missing_relative_file_names_both_paths(self, tmp_path: Path) -> None:
+        etc = tmp_path / "etc"
+        config = config_beside(etc, LEAF % "secrets/token")
+        with pytest.raises(ConfigError) as info:
+            make(MW).resolve(config, {})
+        assert str(info.value) == (
+            f"middleware.config.t: cannot read secret_file secrets/token ({etc}/secrets/token): "
+            f"No such file or directory (from {config})"
+        )
+
+    def test_a_relative_file_not_utf8_names_both_paths_never_the_contents(
+        self, tmp_path: Path
+    ) -> None:
+        etc = tmp_path / "etc"
+        config = config_beside(etc, LEAF % "token")
+        (etc / "token").write_bytes(b"\xff" + VALUE.encode())
+        with pytest.raises(ConfigError) as info:
+            make(MW).resolve(config, {})
+        assert str(info.value) == (
+            f"middleware.config.t: cannot read secret_file token ({etc}/token): not UTF-8 "
+            f"(from {config})"
+        )
+        assert VALUE not in str(info.value)
+
+    def test_an_absolute_file_is_named_once(self, tmp_path: Path) -> None:
+        missing = tmp_path / "missing"
+        config = config_beside(tmp_path / "etc", LEAF % missing)
+        with pytest.raises(ConfigError) as info:
+            make(MW).resolve(config, {})
+        assert str(info.value) == (
+            f"middleware.config.t: cannot read secret_file {missing}: No such file or directory "
+            f"(from {config})"
+        )
+
+    @pytest.mark.parametrize("written", ["token", "~/token"])
+    @pytest.mark.parametrize("base_dir", [None, "tmp"])
+    def test_decision_e_comes_first(
+        self, tmp_path: Path, opened: list[str], written: str, base_dir: str | None
+    ) -> None:
+        secret_file(tmp_path)
+        opened.clear()
+        payload = {"middleware": {"config": {"t": {"secret_file": written}}}}
+        base = None if base_dir is None else tmp_path
+        with pytest.raises(ConfigError) as info:
+            make(MW).resolve(environ={}, layers=[control(payload, base_dir=base)])
+        assert str(info.value) == (
+            "middleware.config.t: secret files are read only from local configuration (the "
+            f"config file or a section's _FILE), not from {CONTROL}"
+        )
+        assert opened == []
 
 
 def _replace_leaf(node: Any, path: str) -> Any:

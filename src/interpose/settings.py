@@ -29,7 +29,8 @@ A setting may be a section (`Setting(..., is_section=True)`, design 0009): its v
 subtree at its key, deep-frozen as a `Section` (or, with `is_list=True`, a tuple of them), read from
 ``<PREFIX><KEY>_FILE`` as a YAML file or from the layers; never from a plain variable. interpose
 checks only its shape. Inside a section, ``{secret_file: <path>}`` becomes a `Secret` holding that
-file, read only from local configuration (a `Layer` with `secret_files=True`).
+file, read only from local configuration (a `Layer` with `secret_files=True`). A relative path
+resolves against the directory of the file that holds it (`Layer.base_dir`, design 0010).
 
 A list section may declare its item fields (`Setting(..., fields=(...))`, design 0009): each item
 is then a `Section` holding every field, each typed and checked as a setting, and the list may also
@@ -358,6 +359,12 @@ class Layer:
     without it, such a leaf is a `ConfigError` and its file is never opened (design 0009, decision
     E). `read_file()` sets it, as does a section's `_FILE`. Never set it on a layer built from a
     remote payload: it would let the sender read any file this process can.
+
+    `base_dir` is the directory a relative `secret_file` path here resolves against (design 0010):
+    `read_file()` sets it to the config file's directory, and a project that builds a layer from a
+    file it read itself sets it to that file's directory. It is used as given, never resolved
+    through symlinks, and reads nothing. With `None`, a relative path is a `ConfigError` and its
+    file is never opened.
     """
 
     data: Mapping[str, Any]
@@ -366,6 +373,7 @@ class Layer:
     origins: Mapping[str, str] = field(default_factory=dict)
     expand: bool = False
     secret_files: bool = False
+    base_dir: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -648,15 +656,20 @@ class Settings(Sequence[Setting]):
         self, path: Path | None = None, environ: Mapping[str, str] | None = None
     ) -> Layer:
         """The config file as a `Layer`: source `"file"`, `where` its path, `expand` the project's,
-        and `secret_files` on.
+        `secret_files` on, and `base_dir` the file's directory.
 
         `path` defaults to `<PREFIX>CONFIG`, else `default_path`; a missing file is an empty layer.
         `environ` defaults to `os.environ`. Raises `ConfigError` if it can't be read or parsed.
         Nothing expands here: `resolve()` expands what each setting reads, with its `environ`.
+        A relative path is made absolute against the working directory here, once, so a later
+        `chdir` never moves the base of its relative secret files (design 0010).
         """
         env = os.environ if environ is None else environ
         if path is None:
             path = Path(env.get(self.config_env, str(self.default_path)))
+        # `absolute()`, not `resolve()`: the base is the directory the operator named, never a
+        # symlink's target, such as a ConfigMap mount's `..data` directory (design 0010).
+        path = Path(path).absolute()
         # With a section's `_FILE`, the places interpose sets `expand` (design 0009, decision C)
         # and `secret_files` (decision E): local configuration only.
         return Layer(
@@ -665,6 +678,7 @@ class Settings(Sequence[Setting]):
             where=str(path),
             expand=self.expand,
             secret_files=True,
+            base_dir=path.parent,
         )
 
     def resolve(
@@ -888,6 +902,7 @@ class _Found:
     name: str  # what a same-level conflict names: the variable, or the key or alias
     expand: bool = False  # a layer's `expand`, or a section's `_FILE`: never a variable
     secret_files: bool = False  # secret leaves may be read: a layer's `secret_files`, or `_FILE`
+    base_dir: Path | None = None  # where a relative secret_file resolves: the layer's, or `_FILE`'s
     # Indexed variables: for each item, what each field that is set holds, in field order.
     items: tuple[Mapping[str, _Found], ...] | None = None
     warn_fields: bool = False  # a list section's _FILE: its unknown fields warn as it is read
@@ -942,6 +957,7 @@ def _found(
                 name,
                 layer.expand,
                 layer.secret_files,
+                base_dir=layer.base_dir,
             )
             for name in names
             if (raw := _lookup(layer.data, name)) is not None
@@ -965,7 +981,8 @@ def _read_section_file(
     setting: Setting, file_var: str, environ: Mapping[str, str], expand: bool
 ) -> _Found:
     """A section's `_FILE`: the YAML file it names, local configuration like the config file
-    (`secret_files` on, `expand` the project's). An empty file is an empty section."""
+    (`secret_files` on, `expand` the project's, and its own directory as `base_dir`, whatever
+    layer the rest came from). An empty file is an empty section."""
     path = Path(environ[file_var])
     label = f"{file_var} ({path})"
     try:
@@ -985,6 +1002,8 @@ def _read_section_file(
         expand,
         secret_files=True,
         warn_fields=bool(setting.fields),
+        # As for the config file: absolute, never through symlinks (design 0010).
+        base_dir=path.absolute().parent,
     )
 
 
@@ -1401,22 +1420,46 @@ def _section_node(node: Any, path: str, found: _Found, active: dict[int, str]) -
 def _secret_leaf(node: Mapping[Any, Any], path: str, found: _Found) -> Secret:
     """A `{secret_file: <path>}` leaf as a `Secret` holding the file, trailing whitespace stripped
     as for `_FILE`. Only from local configuration: anywhere else it is an error, and the file is
-    never opened (design 0009, decision E). Errors name the path and file, never the contents."""
+    never opened (design 0009, decision E). A relative path resolves against `found.base_dir`, and
+    with none it is an error, never opened (design 0010). Errors name the path and file (and, for
+    a relative one, where it resolved), never the contents."""
     _refuse_remote_secret_file(path, found)
     file = node["secret_file"]
     if not isinstance(file, str) or not file:
         raise ConfigError(f"{path}.secret_file: expected a file's path (from {found.origin})")
+    target = _secret_target(file, path, found)
+    named = file if target == Path(file) else f"{file} ({target})"
     try:
-        text = Path(file).read_text(encoding="utf-8")
+        text = target.read_text(encoding="utf-8")
     except OSError as e:
         raise ConfigError(
-            f"{path}: cannot read secret_file {file}: {e.strerror} (from {found.origin})"
+            f"{path}: cannot read secret_file {named}: {e.strerror} (from {found.origin})"
         ) from None
     except UnicodeDecodeError:
         raise ConfigError(
-            f"{path}: cannot read secret_file {file}: not UTF-8 (from {found.origin})"
+            f"{path}: cannot read secret_file {named}: not UTF-8 (from {found.origin})"
         ) from None
     return Secret(text.rstrip())
+
+
+def _secret_target(file: str, path: str, found: _Found) -> Path:
+    """The file a secret leaf's (expanded) path names (design 0010): an absolute path as it is, a
+    relative one under `found.base_dir`, never resolved through symlinks. `~` is refused rather
+    than expanded or taken as a directory's name, and so is a relative path with no base."""
+    written = Path(file)
+    if written.parts and written.parts[0].startswith("~"):  # "." has no parts
+        raise ConfigError(
+            f"{path}: secret_file {file}: '~' is not expanded; write the absolute path "
+            f"(from {found.origin})"
+        )
+    if written.is_absolute():
+        return written
+    if found.base_dir is None:
+        raise ConfigError(
+            f"{path}: secret_file must be absolute here: this configuration has no file to "
+            f"resolve {file} against (from {found.origin})"
+        )
+    return found.base_dir / written
 
 
 def _refuse_remote_secret_file(path: str, found: _Found) -> None:

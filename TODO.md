@@ -27,3 +27,5 @@ the team (and its AI assistants) should know at a glance.
 - Unknown keys as errors (or a strict switch in interpose): breaks rollbacks and shared config files; they warn on `Resolved.warnings`, and a project that wants errors raises on them (design 0009).
 - Unset `${VAR}` expanding to empty by default (qbt-rules' behaviour): a typo in a variable name would configure an empty value silently; it is an error by default, and `expand_unset="empty"` opts in (design 0009).
 - Typed sections everywhere, no free-form: qbt-rules validates its items itself, and `middleware.config` is per middleware by nature, so a schema in interpose would duplicate each one; a section is free-form, and only a list section may declare item fields (design 0009).
+- Resolving a relative `secret_file` from the working directory: the same file would mean different secrets depending on where the service starts; it resolves against the naming file's directory (design 0010).
+- Resolving a relative `secret_file`'s base through symlinks: gives a ConfigMap mount's timestamped `..data` target, which the kubelet removes on update, and breaks a config file linked in from elsewhere (design 0010).
