@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/metalayerlab/interpose/compare/v0.3.0...v0.3.1) (2026-11-04)
+
+
+### ✨ Features
+
+* **settings:** warn on unknown keys and variables, with did-you-mean (design 0009 step 2) ([#40](https://github.com/metalayerlab/interpose/issues/40)) ([5d7b0db](https://github.com/metalayerlab/interpose/commit/5d7b0db1524299639b92d006d85371eeb200a5d0)), closes [#34](https://github.com/metalayerlab/interpose/issues/34)
+
 ## [0.3.0](https://github.com/metalayerlab/interpose/compare/v0.2.2...v0.3.0) (2026-11-04)
 
 
