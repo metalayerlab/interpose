@@ -72,15 +72,15 @@ the condition of its approval. Each is detailed in the section named.
   on a layer built from a remote payload: expansion there would let the control plane read the
   instance's environment. interpose can't tell a remote layer from a local one, so the rule is the
   project's to keep, and the Security wiki page says so ([section 1](#1-values-with-provenance-36)).
-- **E. Control-plane values never read secret files.** A `{secret_file: ...}` leaf is honoured only in a
-  layer with `secret_files=True`, which only `read_file()` and a section's `_FILE` set. In any other
-  layer, a remote payload above all, it is a `ConfigError` naming the section path and saying that secret
-  files are read only from local configuration. It is never read, and never kept as a plain mapping.
-  Otherwise a remote config could make the process read any local file it can see
-  ([section 5](#5-sections-and-lists-of-sections-35)).
 - **D. Changing file error messages is a breaking release.** An error about a file value names the path
   instead of `(from file)`. Code that matched the old text breaks, so the release that ships step 1 is
   marked breaking, though no value or source changes ([Consequences](#consequences)).
+- **E. Control-plane values never read secret files.** Like C, a rule for remote layers: a
+  `{secret_file: ...}` leaf is honoured only in a layer with `secret_files=True`, which only
+  `read_file()` and a section's `_FILE` set. In any other layer, a remote payload above all, it is a
+  `ConfigError` naming the section path and saying that secret files are read only from local
+  configuration. It is never read, and never kept as a plain mapping. Otherwise a remote config could
+  make the process read any local file it can see ([section 5](#5-sections-and-lists-of-sections-35)).
 
 ### Warnings on `Resolved` (shared by #33, #34 and #35)
 
@@ -346,7 +346,7 @@ One PR per step, each with its tests and wiki changes, each released on its own:
 1. **Values with provenance (#36):** `Layer`, `read_file`, `resolve(layers=)`, messages naming the
    path. First, because the others report through it.
 2. **Unknown keys (#34):** `ConfigWarning`, `Resolved.warnings`, `extra_env`, the suggestions; the
-   note in 0001 that this record adds updated from Proposed to Implemented.
+   note in 0001 that this record adds updated from Approved to Implemented.
 3. **Aliases (#33):** uses 2's warnings and 2's "known name" set.
 4. **Expansion (#32):** `expand`, `expand_unset`, the escape.
 5. **Free-form sections (#35):** `is_section`, `Section`, section `_FILE`, secret leaves, `section()`
