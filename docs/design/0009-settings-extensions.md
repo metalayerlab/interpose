@@ -2,7 +2,7 @@
 
 <!-- Add a line for this record to the index in docs/design/README.md (CI checks). -->
 
-Status: Approved
+Status: Implemented (v0.3.0 to v0.4.1)
 Date: 2026-11-03
 Authors: andronics; drafted by Claude
 Approved: 2026-11-04 by the brain coordinator for Stephen.
