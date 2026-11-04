@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.3.0](https://github.com/metalayerlab/interpose/compare/v0.2.2...v0.3.0) (2026-11-04)
+
+
+### ⚠ BREAKING CHANGES
+
+* **settings:** an error about a value from the config file names the file's path instead of "file", e.g. "listen.port: expected int, got 'x' (from /etc/sluice/config.yaml)", and a check error for such a value now ends with the same "(from <path>)". Values and sources are unchanged.
+
+### ✨ Features
+
+* **settings:** resolve from layers with provenance (design 0009 step 1) ([#39](https://github.com/metalayerlab/interpose/issues/39)) ([2a5fbcd](https://github.com/metalayerlab/interpose/commit/2a5fbcdfbac41ac8b6af813fbce64f576d6aaae8)), closes [#36](https://github.com/metalayerlab/interpose/issues/36)
+
+
+### 📚 Documentation
+
+* propose settings extensions (design 0009) ([#37](https://github.com/metalayerlab/interpose/issues/37)) ([380fcf8](https://github.com/metalayerlab/interpose/commit/380fcf88f866a97046a781d112a4b47bf19a7989))
+
 ## [0.2.2](https://github.com/metalayerlab/interpose/compare/v0.2.1...v0.2.2) (2026-11-02)
 
 
