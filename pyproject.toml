@@ -1,7 +1,7 @@
 [project]
 name = "interpose"
 # Owned by release-please: never edit by hand (see the wiki's Release-Process page).
-version = "0.3.1"
+version = "0.3.2"
 description = "Shared mechanism for metalayerlab interceptors \u2014 a policy-configurable async middleware pipeline, the layered settings loader, Secret values, and Prometheus text exposition."
 readme = "README.md"
 requires-python = ">=3.13"

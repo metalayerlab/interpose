@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/metalayerlab/interpose/compare/v0.3.1...v0.3.2) (2026-11-04)
+
+
+### ✨ Features
+
+* **settings:** aliases for renamed settings (design 0009 step 3) ([#42](https://github.com/metalayerlab/interpose/issues/42)) ([a4857b6](https://github.com/metalayerlab/interpose/commit/a4857b6597e858d03335165d4cefcfc4e7c70dd6)), closes [#33](https://github.com/metalayerlab/interpose/issues/33)
+
 ## [0.3.1](https://github.com/metalayerlab/interpose/compare/v0.3.0...v0.3.1) (2026-11-04)
 
 
