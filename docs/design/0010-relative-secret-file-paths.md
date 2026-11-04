@@ -2,9 +2,10 @@
 
 <!-- Add a line for this record to the index in docs/design/README.md (CI checks). -->
 
-Status: Proposed
+Status: Approved
 Date: 2026-11-04
 Authors: andronics; drafted by Claude
+Approved: 2026-11-04 by the arbiter (question "Approve Interpose Record 0010 On Relative Secret Files").
 
 ## Context
 
@@ -34,7 +35,10 @@ The arbiter decided this as "Where Interpose Resolves A Relative Secret File" (2
 resolve a relative path against the directory of the file that names it, ship it in interpose 0.5.0 as
 a breaking change, and record it in a new record amending 0009, since an Implemented record is amended
 by a new one, never rewritten (as 0009 amended 0001). This is that record. The code follows in its own
-PR once this is approved.
+PR.
+
+The arbiter approved this record on 2026-11-04 ("Approve Interpose Record 0010 On Relative Secret
+Files"), option (a), with the three open questions answered as recommended.
 
 Constraints, from 0009: secret leaves are read only from local configuration (decision E); errors name
 paths, never contents; no I/O at import; stdlib and pyyaml only.
@@ -57,7 +61,8 @@ This **amends 0009's `secret_file` rule** (section 5, and decision E's list of l
   is a `ConfigError`: `x.token: secret_file ~/token: '~' is not expanded; write the absolute path (from
   /etc/myapp/config.yaml)`. Today it silently means a directory named `~` under the working directory;
   resolving it against the config file's directory instead would be just as surprising. Refusing it
-  leaves room to expand it later without changing what any working file means.
+  leaves room to expand it later without changing what any working file means
+  ([question 2](#open-questions)).
 - **Symlinks are not resolved** in the base. The base is the naming file's directory as given
   (`/etc/myapp` for `/etc/myapp/config.yaml`), never its real path. A Kubernetes ConfigMap or Secret
   mount makes each file a symlink through `..data` into a timestamped directory that the kubelet
@@ -67,8 +72,8 @@ This **amends 0009's `secret_file` rule** (section 5, and decision E's list of l
   open does.
 - **A relative config path** (`MYAPP_CONFIG=config.yaml`) is made absolute against the working
   directory when the file is read (`Path.absolute()`, no symlink resolution), once, so the base never
-  changes after that. This is the one place the working directory still counts, as it already does for
-  finding the config file.
+  changes after that ([question 3](#open-questions)). This is the one place the working directory
+  still counts, as it already does for finding the config file.
 
 ### 2. Where the value has no file: `Layer.base_dir`
 
@@ -89,7 +94,7 @@ class Layer:
 ```
 
 - **`base_dir: Path | None = None`**: the directory a relative `secret_file` path in this layer
-  resolves against. `read_file()` sets it to the config file's directory (absolute, as above). A
+  resolves against ([question 1](#open-questions)). `read_file()` sets it to the config file's directory (absolute, as above). A
   section's `_FILE` uses its own file's directory, whatever layer the rest came from. A project that
   builds a layer from a file it read itself sets it to that file's directory.
 - **With `base_dir=None`, a relative path is a `ConfigError`** naming the leaf's path:
@@ -139,12 +144,16 @@ file or directory (from /etc/myapp/config.yaml)`. An absolute path is named once
 
 ## Open questions
 
+Answered by the arbiter on 2026-11-04, each with the recommended answer.
+
 1. **The field's name.** Recommend `base_dir: Path | None = None`: it says it is a directory, and
    `base` alone reads like a base layer in a list of layers. `relative_to` would also work but reads as
-   a method.
+   a method. **Answer: `base_dir: Path | None = None`.**
 2. **`~`.** Recommend refusing it, as in section 1: it has never been expanded, so nothing working
    depends on it, and an error now keeps expanding it later a non-breaking choice. The other options are
    expanding it (`Path.expanduser()`, which depends on the service user's home, rarely what a service
-   wants) or treating it as an ordinary relative part (`<base>/~/token`, surprising).
+   wants) or treating it as an ordinary relative part (`<base>/~/token`, surprising). **Answer:
+   refused,** a `ConfigError`.
 3. **Should a relative config path's base be fixed at read time?** Recommend yes (`Path.absolute()` in
    `read_file()`), so a reload after the process changes directory resolves the same files.
+   **Answer: yes,** made absolute once, when the file is read.
