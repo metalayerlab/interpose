@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/metalayerlab/interpose/compare/v0.4.0...v0.4.1) (2026-11-04)
+
+
+### ✨ Features
+
+* **settings:** typed list items and indexed variables (design 0009 step 6) ([#51](https://github.com/metalayerlab/interpose/issues/51)) ([c85e52f](https://github.com/metalayerlab/interpose/commit/c85e52fe1473cc09a52d88481b3e03d559494b64))
+
 ## [0.4.0](https://github.com/metalayerlab/interpose/compare/v0.3.3...v0.4.0) (2026-11-04)
 
 
