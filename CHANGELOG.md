@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.2](https://github.com/metalayerlab/interpose/compare/v0.4.1...v0.4.2) (2026-11-04)
+
+
+### 🐛 Bug Fixes
+
+* **settings:** a section value that holds itself is a ConfigError, not RecursionError ([#57](https://github.com/metalayerlab/interpose/issues/57)) ([e838744](https://github.com/metalayerlab/interpose/commit/e838744cca8a23d230b5c5da28ca05e7e0e0b365))
+
+
+### 📚 Documentation
+
+* mark design 0009 Implemented ([#54](https://github.com/metalayerlab/interpose/issues/54)) ([a01140a](https://github.com/metalayerlab/interpose/commit/a01140a2bd0226b0a0d262a2f3d91ee2843edd2c))
+
 ## [0.4.1](https://github.com/metalayerlab/interpose/compare/v0.4.0...v0.4.1) (2026-11-04)
 
 
