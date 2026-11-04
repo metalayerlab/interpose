@@ -9,8 +9,8 @@ Authors: andronics; drafted by Claude
 ## Context
 
 qbt-rules is moving its configuration onto `interpose.settings` (v0.2.x) and had to build five things in
-its own layer that every consumer will want. Each is an issue here, with qbt-rules' current behaviour in
-its comments:
+its own layer that every consumer will want. Each is an issue here. qbt-rules' current behaviour is in
+the comments on #32 and #35 and in its `src/qbt_rules/config.py` (read at its v0.11.1):
 
 - **[#32](https://github.com/metalayerlab/interpose/issues/32) `${VAR}` expansion.** qbt-rules expands
   `${VAR}` and `${VAR:-default}` in every string value of its YAML tree, inside longer strings too
@@ -23,12 +23,12 @@ its comments:
   silently keeps its default. qbt-rules warns, suggesting the closest key.
 - **[#35](https://github.com/metalayerlab/interpose/issues/35) Lists of mappings and sections.**
   qbt-rules' `schedule` is a list of `{cron, context}` items, overridable by indexed variables
-  `QBT_RULES_SCHEDULE_<N>_CRON` / `_CONTEXT` (each with its `_FILE` form). mitm-proxy's capture design
-  (its 0012, Proposed, on branch `design/capture-reverse-proxy`) needs the same: `reverse`, a list of
-  `{listen, upstream}`, and `middleware.config`, a mapping of free-form per-middleware options; its open
-  question 1 asks for a declared **section** setting here. sluice will want per-middleware options too.
-  Today a value is a scalar, a list of scalars or a `Secret`, and nested objects are a non-goal
-  (Introduction).
+  `QBT_RULES_SCHEDULE_<N>_CRON` / `_CONTEXT` (each with its `_FILE` form), numbered from 0; the first
+  missing `_CRON` ends the list. mitm-proxy's capture design (its 0012, Approved and merged) needs the
+  same: `reverse`, a list of `{listen, upstream}`, and `middleware.config`, a mapping of free-form
+  per-middleware options; its open question 1 was decided as a declared **section** setting here, in its
+  own interpose record (this one). sluice will want per-middleware options too. Today a value is a
+  scalar, a list of scalars or a `Secret`, and nested objects are a non-goal (the wiki's Introduction).
 - **[#36](https://github.com/metalayerlab/interpose/issues/36) Provenance.** `resolve()` reads only a
   file path and an environment. A consumer that pre-processes its configuration can only hand results
   back as environment variables, so an error says `(from QBT_RULES_X)` rather than the file and key.
@@ -40,8 +40,11 @@ each; the details are this record's). This record stays Proposed until its revie
 
 Constraints, all from [0001](0001-initial-design.md) and [0007](0007-check-replacements-and-typed-accessors.md):
 
-- **Compatible by default.** A project that changes nothing sees the same values, sources and errors,
-  except that an unknown key now gives a warning (#34). Every new behaviour is declared by the project.
+- **Compatible by default.** A project that changes nothing sees the same values and sources, and the
+  same errors except that an error about a file value names the file's path instead of `file`
+  ([decision D](#authors-decisions)). An unknown key or prefixed variable now gives a warning (#34),
+  which the project sees only if it reads `Resolved.warnings`. Every other new behaviour is declared by
+  the project.
 - **The lookup order holds:** `_FILE` > variable > file > default, per setting.
 - **Values are never logged**, and a secret setting's value is never in a message. A warning names keys
   and variables, never values.
@@ -50,7 +53,26 @@ Constraints, all from [0001](0001-initial-design.md) and [0007](0007-check-repla
 
 ## Decision
 
-Five features, each its own PR (see [Build order](#build-order)). The common pieces come first.
+Five features, built in six PRs (see [Build order](#build-order)). The common pieces come first.
+
+### Author's decisions
+
+Four choices the issues left open, made by this record and flagged for the reviewer. Each is detailed in
+the section named.
+
+- **A. `${VAR}` expansion is opt-in per project.** `Settings(..., expand=True)`; off by default, so no
+  existing `${` in a file changes meaning ([section 4](#4-var-expansion-32)).
+- **B. Warnings are returned on `Resolved.warnings`.** interpose never logs, prints or raises them, and
+  has no strict switch; the project logs them, or raises if it wants strictness
+  ([Warnings on `Resolved`](#warnings-on-resolved-shared-by-33-34-and-35)).
+- **C. Control-plane values never expand.** A `Layer` expands only with `expand=True`, which defaults to
+  false; `read_file()` is the only place interpose sets it, for the local file. A project must not set it
+  on a layer built from a remote payload: expansion there would let the control plane read the
+  instance's environment. interpose can't tell a remote layer from a local one, so the rule is the
+  project's to keep, and the Security wiki page says so ([section 1](#1-values-with-provenance-36)).
+- **D. Changing file error messages is a breaking release.** An error about a file value names the path
+  instead of `(from file)`. Code that matched the old text breaks, so the release that ships step 1 is
+  marked breaking, though no value or source changes ([Consequences](#consequences)).
 
 ### Warnings on `Resolved` (shared by #33, #34 and #35)
 
@@ -84,7 +106,7 @@ class Layer:
     data: Mapping[str, Any]  # a YAML-shaped tree: what yaml.safe_load gives
     source: str  # what `sources` says for a value from here: "file", "control plane"
     where: str  # for messages: "/etc/qbt-rules/config.yaml", "control plane (config v12)"
-    origins: Mapping[str, str] = {}  # dotted key -> a finer "where" for that key
+    origins: Mapping[str, str] = field(default_factory=dict)  # dotted key -> a finer "where"
     expand: bool = False  # expand ${VAR} in its strings (section 4)
     secret_files: bool = False  # read {secret_file: ...} leaves in sections (section 5)
 
@@ -110,15 +132,18 @@ class Settings:
   environ)])`, exactly today's behaviour.
 - **Provenance in messages.** A coercion or check error for a value from a layer says where it came
   from: `listen.port: expected int, got 'x' (from /etc/sluice/config.yaml)`, using `origins[key]` when
-  present, else `where`. Today's file messages say `(from file)`; they now name the path. `sources`
-  keeps its values (`"file"` for the file layer), so code comparing against them is unaffected.
+  present, else `where`. Today a coercion error for a file value says `(from file)` and a check error
+  names no source; both now name the path (decision D). `sources` keeps its values (`"file"` for the
+  file layer), so code comparing against them is unaffected.
 - **A consumer that pre-processes** (qbt-rules today) builds its own `Layer` with `origins`, instead of
   writing environment variables. With sections 2 to 5 built, qbt-rules needs none of its own
   pre-processing, so this is mostly for managed configuration and tests.
 - **Managed settings.** mitm-proxy's managed mode passes `layers=[Layer(payload, source="control plane",
-  where="control plane (config v12)")]` for its managed keys. Its rule that a managed key set locally is
+  where="control plane (config v12)"), settings.read_file()]`: the payload for its managed keys, then
+  its local file, since `layers` replaces the file. Its rule that a managed key set locally is
   a `ConfigError` stays in mitm-proxy, which reads `sources`. A layer from a remote payload keeps
-  `expand=False`: expanding `${VAR}` in it would let the control plane read the instance's environment.
+  `expand=False` (decision C): expanding `${VAR}` in it would let the control plane read the instance's
+  environment.
 - `data` is read, never kept or changed; `Resolved` holds coerced copies.
 
 ### 2. Unknown keys warn, with a suggestion (#34)
@@ -127,8 +152,9 @@ This **amends 0001's "Unknown YAML keys are ignored"**: they are still ignored f
 each also gives an `unknown` warning.
 
 - **Which keys.** After resolving, interpose walks every layer's tree. A dotted path is known if it is a
-  declared key or alias (section 3), or a parent of one (`listen` for `listen.port`). Below a section
-  setting (section 5) nothing is checked: a free-form section's content is the project's to validate.
+  declared key or alias (section 3), or a parent of one (`listen` for `listen.port`). Below a free-form
+  section setting (section 5) nothing is checked: its content is the project's to validate. A typed list
+  section's items are checked against its declared fields (section 5).
   Each unknown path is reported once, at its first unknown level (`listne`, not each key below it).
 - **Which variables.** A variable that starts with the prefix and that no setting reads (its variable,
   `_FILE`, an alias's, a list section's indexed variables, `<PREFIX>CONFIG`) gives an `unknown` warning.
@@ -171,20 +197,21 @@ Setting("listen.port", 8080, "...", aliases=("port",))
 ### 4. `${VAR}` expansion (#32)
 
 ```python
-Settings("QBT_RULES_", (...), default_path=..., expand=True, expand_unset="error")
+Settings("QBT_RULES_", (...), default_path=..., expand=True, expand_unset="empty")  # qbt-rules 0.x
 ```
 
-- **Opt-in per project:** `expand: bool = False`. With it, the config file's layer (and a section's
-  `_FILE`, section 5) expands; a `Layer` a project builds expands only with `expand=True`. Variables and
-  scalar `_FILE` contents never expand: the shell already did, and a secret file holding `${` must
-  arrive as written.
+- **Opt-in per project** (decision A): `expand: bool = False`. With it, the config file's layer (and
+  a section's `_FILE`, section 5) expands; a `Layer` a project builds expands only with `expand=True`.
+  Variables and scalar `_FILE` contents never expand: the shell already did, and a secret file holding
+  `${` must arrive as written.
 - **Syntax:** `${NAME}` and `${NAME:-default}`, `NAME` being `[A-Za-z_][A-Za-z0-9_]*`. `:-` takes the
-  default when the variable is unset or empty, as in the shell. The default is literal text without `}`
-  (no nested expansion). `$${` gives a literal `${`. Any other `${` (unclosed, a bad name) is a
-  `ConfigError` naming the key: write `$${` for a literal. A `$` not followed by `{` is literal.
-- **Unset, no default: an error by default.** `ConfigError("url: ${HOST} is not set and has no default
-  (from /etc/qbt-rules/config.yaml)")`. `expand_unset="empty"` opts in to expanding it to the empty
-  string, qbt-rules' current behaviour, for its compatibility.
+  default when the variable is unset or empty, as in the shell ([open question 1](#open-questions)). The
+  default is literal text without `}` (no nested expansion). `$${` gives a literal `${`. Any other `${`
+  (unclosed, a bad name) is a `ConfigError` naming the key: write `$${` for a literal. A `$` not
+  followed by `{` is literal.
+- **Unset, no default: an error by default** (`expand_unset="error"`). `ConfigError("url: ${HOST} is
+  not set and has no default (from /etc/qbt-rules/config.yaml)")`. `expand_unset="empty"` opts in to
+  expanding it to the empty string, qbt-rules' current behaviour, for its compatibility.
 - **What expands:** every string scalar in the subtree of a setting that is read, including inside
   longer strings, list items and a section's leaves (keys never). Non-strings are untouched. Unknown keys
   aren't expanded, so a stray `${X}` in an ignored key can't fail a load. Typing comes after, so
@@ -195,9 +222,11 @@ Settings("QBT_RULES_", (...), default_path=..., expand=True, expand_unset="error
   value shows the text as written (`got 'https://${HOST}:x'`), not the expanded one, since a non-secret
   value can embed a secret variable (`https://user:${PASS}@host`); for a secret setting, nothing.
 - **Provenance:** `sources` stays the layer's (`"file"`); expansion is an implementation of the file.
-- **Differences from qbt-rules,** all deliberate: unset is an error unless `expand_unset="empty"`; `$${`
-  is an escape (qbt-rules would give `$` and the value); names are environment-variable names
-  (qbt-rules takes anything but `}` and `:`).
+- **Differences from qbt-rules,** all deliberate: unset is an error unless `expand_unset="empty"`; a
+  variable set to the empty string gives the `:-` default (qbt-rules gives the empty string, and
+  `expand_unset="empty"` doesn't change that: open question 1); `$${` is an escape (qbt-rules would give
+  `$` and the value); names are environment-variable names (qbt-rules takes anything but `}` and `:`,
+  so a `${vars.x}` that qbt-rules expands to empty is a `ConfigError` here).
 
 ### 5. Sections and lists of sections (#35)
 
@@ -216,6 +245,9 @@ Setting("reverse", "", "Reverse-proxy listeners.", is_section=True, is_list=True
   tuples, scalars as YAML loaded them (str, int, float, bool, date, `None`). A `Section` is hashable and
   equal to another with the same content, so a reload can compare old and new. A list section is a
   `tuple[Section, ...]`. `Value` gains both.
+- **Accessors.** `Resolved.section(key)` gives a section setting's `Section` and `Resolved.sections(key)`
+  a list section's tuple, raising `TypeError` naming the key for another kind, as 0007's typed accessors
+  do (and they, in turn, refuse a section).
 - **Sources of a value**, in the usual order:
   - `<PREFIX><KEY>_FILE` names a **YAML file** whose top level is the section (a mapping, or a list for
     a list section): for a Kubernetes ConfigMap or Secret mount. It expands when `expand` is on.
@@ -230,7 +262,8 @@ Setting("reverse", "", "Reverse-proxy listeners.", is_section=True, is_list=True
 - **Secret leaves.** Inside a section, a mapping that is exactly `{secret_file: <path>}` is replaced, at
   resolve, by a `Secret` holding that file's contents, trailing newline stripped as for `_FILE`. An
   unreadable file is a `ConfigError` naming the section path and the file, never the contents. This
-  is mitm-proxy 0012's rule, made generic: no secret is written inline in a section. A `Section`'s
+  is mitm-proxy 0012's rule, made generic: no secret is written inline in a section. Secret leaves are
+  read in every section, not declared per setting ([open question 3](#open-questions)). A `Section`'s
   `repr()` masks every `Secret` (it already does, `Secret` being masked).
 - **Typed items (optional, per setting).** A list section may declare its item fields:
 
@@ -244,26 +277,33 @@ Setting("reverse", "", "Reverse-proxy listeners.", is_section=True, is_list=True
   - A field is a `Setting` with a one-part key; its default sets its type, coercion and `check` are the
     usual ones, and `required=True` (allowed only on a field) makes a missing field an error. A field
     may be `secret=True` or a free-form section. An item resolves to a `Section` holding every field.
-  - An unknown field in an item gives an `unknown` warning with a suggestion (section 2's rule); errors
-    name the item: `schedule[2].cron: ... (from /etc/qbt-rules/config.yaml)`.
+  - An unknown field in an item gives an `unknown` warning with a suggestion (section 2's rule, and
+    [open question 2](#open-questions)); errors name the item: `schedule[2].cron: ... (from
+    /etc/qbt-rules/config.yaml)`.
   - **Indexed variables.** Only with fields: `<PREFIX><KEY>_<N>_<FIELD>` and its `_FILE`, for `N` from
     0. Item `N` exists when any of its field variables is set; the first `N` with none ends the list. A
     variable past the end (`_3_CRON` with no `_2_*`) gives an `ignored` warning. A required field missing
     from an indexed item is a `ConfigError` naming the variable (`QBT_RULES_SCHEDULE_1_CONTEXT is not
     set, but QBT_RULES_SCHEDULE_1_CRON is`). When any indexed variable is set, the list **replaces** the
     file's, never merges. `sources` gives `<PREFIX><KEY>_<N>_*` (`QBT_RULES_SCHEDULE_<N>_*`); messages
-    name the exact variable. `Settings` rejects any setting whose variable fits the indexed pattern.
-  - qbt-rules' behaviour carries over, except that a straggler variable now warns instead of being
-    silently ignored.
+    name the exact variable. `Settings` rejects any other setting or alias whose variable fits a
+    declared list section's indexed pattern (`QBT_RULES_SCHEDULE_0_CRON` can't also be a setting's).
+  - qbt-rules' behaviour carries over, with two differences. A straggler variable now warns instead of
+    being silently ignored. And an item ends the list only when none of its field variables is set:
+    qbt-rules ends it at the first missing `_CRON`, so a lone `_1_CONTEXT` was ignored there and is a
+    `ConfigError` here (interpose can't know which field marks an item).
 - **Managed settings.** A section is managed or bootstrap like any setting; in a control-plane `Layer`,
   the payload's subtree is the value. A `{secret_file: ...}` leaf in a remote payload would make the
   instance read a local file the control plane names, so secret leaves are only read from local layers
   (the file and `_FILE`); a `Layer` must say `secret_files=True` to allow them (default false).
 - **Reload.** Resolution is the same on every call; a reload gets fresh `Section`s and secret-leaf
   contents, and compares by equality.
-- **The wiki table.** `scripts/gen-wiki.py` reads `key`, `default`, `help`, `secret`, `is_list` and
-  `env`, which keep their meaning; a section's row gives its type as "section" or "list of sections"
-  and its variable as `_FILE` only (or the indexed form).
+- **The wiki table.** The consumers' `scripts/gen-wiki.py` (template-owned, from template-python;
+  interpose's own copy generates no settings table) reads `key`, `default`, `help`, `secret`, `is_list`
+  and `env`, which keep their meaning. Today it describes every `is_list` setting as "A list: YAML, or
+  comma-separated", which is wrong for a list section, so template-python's generator gains a section
+  row: its type as "section" or "list of sections", and its variable as `_FILE` only (or the indexed
+  form). That is a template-python change, asked for there when step 5 ships.
 
 ### Interface summary
 
@@ -279,12 +319,12 @@ Setting("reverse", "", "Reverse-proxy listeners.", is_section=True, is_list=True
 
 ### Build order
 
-One PR per feature, each with its tests and wiki changes, each released on its own:
+One PR per step, each with its tests and wiki changes, each released on its own:
 
 1. **Values with provenance (#36):** `Layer`, `read_file`, `resolve(layers=)`, messages naming the
    path. First, because the others report through it.
-2. **Unknown keys (#34):** `ConfigWarning`, `Resolved.warnings`, `extra_env`, the suggestions; 0001's
-   implementation note updated to point here.
+2. **Unknown keys (#34):** `ConfigWarning`, `Resolved.warnings`, `extra_env`, the suggestions; the
+   note in 0001 that this record adds updated from Proposed to Implemented.
 3. **Aliases (#33):** uses 2's warnings and 2's "known name" set.
 4. **Expansion (#32):** `expand`, `expand_unset`, the escape.
 5. **Free-form sections (#35):** `is_section`, `Section`, section `_FILE`, secret leaves, `section()`
@@ -327,7 +367,11 @@ TODO.md's "Decided against" gains the first, third and sixth.
 - Every consumer sees unknown-key warnings on upgrade, once it logs `Resolved.warnings`; a typo found
   this way was silently ignored before. Until it logs them, nothing changes.
 - **Breaking, in small ways:** file errors name the path instead of `file`; `Value` gains two types, so
-  an exhaustive `match` on it needs two more cases. The release that ships step 1 is marked breaking.
+  an exhaustive `match` on it needs two more cases. The release that ships step 1 is marked breaking
+  (decision D), and so is the one that ships step 5.
+- qbt-rules: a variable set to the empty string now gives a `${VAR:-default}` its default (open question
+  1), a lone `SCHEDULE_<N>_CONTEXT` is now an error, and a `${...}` whose name isn't an environment
+  variable name is now an error. Its changelog says so when it adopts steps 4 and 6.
 - 0001's "Unknown YAML keys are ignored" is amended by this record (a note there points here); 0001
   itself isn't rewritten.
 - Wiki: Introduction (sections leave the non-goals; nested objects are now a section), API-Reference
@@ -337,9 +381,13 @@ TODO.md's "Decided against" gains the first, third and sixth.
 
 ## Open questions
 
-1. **Should `:-` treat an empty variable as unset, as the shell does?** Recommend yes. qbt-rules'
-   pattern is the same `:-`; check that its configurations don't rely on an empty variable winning over
-   a default before it adopts step 4.
+1. **Should `${VAR:-default}` use the default when `VAR` is set but empty?** Recommend yes, as the
+   POSIX shell does: an empty variable is nearly always a mistake or a placeholder, and the shell rule is
+   what operators expect from the syntax. qbt-rules does the opposite today: its source (v0.11.1,
+   `_expand`) takes `env.get(name, default or "")`, so a variable set to `""` wins over the default.
+   Its example config mentions the syntax without using `:-`, and its own deployments' files weren't
+   reachable from here, so whether any rely on the empty value is unknown. If one does, it breaks on
+   adopting step 4, and `expand_unset="empty"` doesn't cover it; qbt-rules checks before it adopts.
 2. **Should an unknown field inside a typed item warn, or be an error?** Recommend warn, the same rule
    as section 2. mitm-proxy 0012 wants errors for its capture options, which are free-form and
    validated by mitm-proxy; for `reverse`'s typed items it can raise on the warning.
