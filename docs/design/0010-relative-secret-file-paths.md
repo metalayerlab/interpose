@@ -2,10 +2,11 @@
 
 <!-- Add a line for this record to the index in docs/design/README.md (CI checks). -->
 
-Status: Approved
+Status: Implemented (v0.5.0)
 Date: 2026-11-04
 Authors: andronics; drafted by Claude
 Approved: 2026-11-04 by the arbiter (question "Approve Interpose Record 0010 On Relative Secret Files").
+Implemented: 2026-11-04, approved by the arbiter (question "Mark Interpose Record 0010 Implemented").
 
 ## Context
 
