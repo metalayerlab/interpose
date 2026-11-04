@@ -90,6 +90,8 @@ Config(log_level='INFO', port=9090, token=Secret('********'), hosts=('example.or
 
 `config.token.reveal()` gives the token at the point of use. A misspelt key, such as `prot:` under `listen:`, is ignored and logs `unknown key 'listen.prot' in /etc/myapp/config.yaml: did you mean 'listen.port'?`. A bad value stops it with one line, such as `listen.port: expected int, got 0.5 (from /etc/myapp/config.yaml)`.
 
+A project that passes `Settings(..., expand=True)` lets its config file use the environment: `port: "${PORT:-9090}"` takes `$PORT`, else 9090, and an unset `${HOST}` with no default is an error. It is off by default.
+
 For secrets that aren't settings (a middleware's API keys, say), `read_secret_dir(Path("/run/secrets"))` reads each file in a directory as a `Secret`.
 
 ## Next steps

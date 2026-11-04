@@ -54,6 +54,18 @@ The setting was renamed, and the configuration still uses its old name. The old 
 
 The same setting is given under its current name and its old name at the same level (both in one file, or both as variables), with different values, so neither can be trusted to win. Remove the old name. Equal values are accepted, with the warning above.
 
+### "upstream.url: ${HOST} is not set and has no default (from /etc/myapp/config.yaml)"
+
+The project expands `${VAR}` in its config file, and the variable isn't in the environment. Set it, or give a default: `${HOST:-localhost}`, which is also used when the variable is set but empty. If the project passes `expand_unset="empty"`, an unset variable gives the empty string instead.
+
+### "a ${ at character 9 that isn't ${NAME} or ${NAME:-default} ...: write $${ for a literal ${"
+
+The project expands `${VAR}` in its config file, and a value has a `${` that isn't a variable: unclosed, empty, or a name with characters other than letters, digits and `_` (`${vars.x}`). Write `$${` where you mean a literal `${`. A `$` not followed by `{` needs no escape.
+
+### A setting shows `${VAR}` instead of its value
+
+The project doesn't expand variables in its config file (`Settings(expand=...)` is off by default), or the value came from an environment variable, a `_FILE` or a project-built layer, which never expand.
+
 ### A secret shows as `********` where its value is needed
 
 The code called `str()` on the `Secret`. Call `reveal()` at the point of use.
