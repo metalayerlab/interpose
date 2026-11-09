@@ -2,7 +2,7 @@
 """Regenerate the generated sections of docs/wiki/ from the code. Template-owned: template-python.
 
     uv run scripts/gen-wiki.py           # rewrite the sections
-    uv run scripts/gen-wiki.py --check   # CI: fail if any section is stale
+    uv run scripts/gen-wiki.py --check   # CI: fail if any of them is stale
 
 A generated section sits between markers, and everything between them is replaced:
 
